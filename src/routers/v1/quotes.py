@@ -7,27 +7,13 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
 
 from src.repositories.quote_repository import QuoteRepository
 from src.types.domain.quote import QuoteRaw
-from src.types.enums.trading import DataQualityState
+from src.types.schemas import QuoteIngestRequest
 
 router = APIRouter(prefix="/quotes", tags=["quotes"])
 _repo = QuoteRepository()
-
-
-class QuoteIngestRequest(BaseModel):
-    """行情录入请求数据模型。"""
-
-    quote_id: str = Field(description="报价记录唯一标识")
-    source_id: str = Field(description="数据源标识")
-    bid_price: float = Field(description="客户卖出价（元/克）")
-    ask_price: float = Field(description="客户买入价（元/克）")
-    quote_at: datetime = Field(description="源头报价时间戳")
-    is_tradable: bool = Field(default=True, description="是否处于可交易状态")
-    quality_state: DataQualityState = Field(default=DataQualityState.NORMAL, description="数据质量状态")
-    product_code: str = Field(default="GOLD_ACCUMULATION", description="产品代码")
 
 
 @router.post("", response_model=QuoteRaw)

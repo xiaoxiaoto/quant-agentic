@@ -6,17 +6,18 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
 
 from src.services.decision_engine import DecisionEngine
 from src.services.feature_engine import FeatureEngine
 from src.services.predictor import ModelPredictor
 from src.services.risk_engine import RiskEngine
 from src.services.shadow_ledger import ShadowLedger
-from src.types.domain.decision import Decision
 from src.types.domain.feature import ModelPrediction
-from src.types.domain.quote import QuoteRaw
 from src.types.enums.trading import HoldingPeriod
+from src.types.schemas import (
+    DecisionEvaluateRequest,
+    DecisionEvaluateResponse,
+)
 
 router = APIRouter(prefix="/decisions", tags=["decisions"])
 
@@ -25,21 +26,6 @@ _predictor = ModelPredictor()
 _decision = DecisionEngine()
 _risk = RiskEngine()
 _ledger = ShadowLedger()
-
-
-class DecisionEvaluateRequest(BaseModel):
-    """决策触发请求参数。"""
-
-    quote: QuoteRaw = Field(description="当前基准行情")
-    target_buy_grams: float = Field(default=1.0, description="建议单笔申报克重")
-
-
-class DecisionEvaluateResponse(BaseModel):
-    """决策评估结果响应模型。"""
-
-    raw_decision: Decision = Field(description="元决策引擎原始建议")
-    approved_decision: Decision = Field(description="独立风控一票否决核验后的最终决策")
-    risk_violations: list[str] = Field(default_factory=list, description="风控拦截违规原因列表")
 
 
 @router.post("/evaluate", response_model=DecisionEvaluateResponse)
