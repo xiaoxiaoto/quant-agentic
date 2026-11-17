@@ -1,0 +1,189 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project — quant-agentic
+
+TODO(init-project): add one sentence describing what this project does.
+
+## Commands
+
+All commands use `uv`. Never use `pip`, `poetry`, or hand-edit `pyproject.toml` for dependencies.
+
+- `make dev` — start the dev server: `uv run uvicorn main:app --reload --port 8000`.
+- `uv run python main.py` — run the composition root directly (port 8000, reload enabled).
+- `make check-all` — lint, format, typecheck, architecture gates, and tests in one shot.
+
+Quality gates while iterating:
+
+```bash
+uv run ruff check         # lint
+uv run ruff format        # format
+uv run pyright            # type-check
+uv run lint-imports       # layered architecture contract
+uv run pytest             # full test suite
+uv run pytest tests/architecture/   # only the architecture test
+```
+
+## Engineering discipline
+
+### 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+### 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+### 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## Python naming conventions
+
+Follow these names for new Python code:
+
+| Type | Public | Internal |
+| --- | --- | --- |
+| Modules | `lower_with_under` | `_lower_with_under` |
+| Packages | `lower_with_under` | |
+| Classes | `CapWords` | `_CapWords` |
+| Exceptions | `CapWords` | |
+| Functions | `lower_with_under()` | `_lower_with_under()` |
+| Global/Class Constants | `CAPS_WITH_UNDER` | `_CAPS_WITH_UNDER` |
+| Global/Class Variables | `lower_with_under` | `_lower_with_under` |
+| Instance Variables | `lower_with_under` | `_lower_with_under` protected, `__lower_with_under` private |
+| Method Names | `lower_with_under()` | `_lower_with_under()` protected, `__lower_with_under()` private |
+| Function/Method Parameters | `lower_with_under` | |
+| Local Variables | `lower_with_under` | |
+
+## Python code organization
+
+All non-exempt Python modules must manage code with classes.
+Code comments and docstrings must be written in Chinese (代码注释与文档字符串必须使用中文)，且注释中不得存在（§9.2）、G-1 等计划文档条款编号。
+
+Exempt paths:
+
+- `main.py`
+- `src/routers/**`
+- `tests/**`
+
+Class bodies must be ordered by member category:
+
+1. Private variables: class-body assignments to `_name` or `__name`
+2. Public variables: class-body assignments to names without a leading underscore
+3. Private methods: `def _name` or `def __name`
+4. Public methods: `def name`
+
+For non-exempt modules, avoid top-level business functions. Put behavior on classes and keep module-level code limited to imports, constants, type aliases, and compatibility wrappers when they are truly needed.
+
+## Architecture — layered dependency direction
+
+This project follows a strict 7-layer architecture. Each layer may import any layer to its left; reverse imports are forbidden and are caught by `import-linter` and the AST test under `tests/architecture/`.
+
+```
+types → config → repositories → services → agents → runtime → routers
+```
+
+| Layer | May import | Purpose |
+| --- | --- | --- |
+| `types` | (nothing in `src/`) | Domain types, Pydantic v2 schemas, enums, domain exceptions |
+| `config` | `types` | Settings (Pydantic Settings), env, constants, logging config |
+| `repositories` | `types`, `config` | SQLAlchemy ORM models + DB access |
+| `services` | `types`, `config`, `repositories` | Business logic |
+| `agents` | `types`, `config`, `repositories`, `services` | Decision / orchestration (LLM tools, planners) |
+| `runtime` | all above | Shared execution primitives — DI providers, middleware, lifespan, scheduler, request context. **Must not import `routers`.** |
+| `routers` | all above | HTTP / WebSocket entry points. **Not imported by any layer** — only mounted by `main.py`. |
+| `main.py` | everything | Composition root, lives outside `src/`. Only file allowed to wire every layer. |
+
+### Rules when writing or modifying code
+
+1. **Identify the target layer first.** If a change spans layers, plan the cuts up front.
+2. **Every new import must respect the table above.** If a needed dependency points "upward", invert it — inject via parameter, define an interface in `types`, or move the shared piece to a layer below. Never relax the contract.
+3. **Run `uv run lint-imports` and `uv run pytest tests/architecture/` after editing.** A failure means the design is wrong, not the tool.
+4. **`main.py` is the only file that may import every layer.** It is the composition root, deliberately placed outside `src/` so the contract can declare "no `src/` package imports `routers`" without exception.
+
+## Configuration
+
+- Settings live in `src/config/settings.py`: `Settings(AppSettings, ServerSettings)` composes two `BaseSettings` subclasses, so all fields land flat on `Settings`.
+- Values are read from environment variables, overridden by the git-ignored `.env` file (loaded relative to the working directory).
+- Env names are the field names in caps: `NAME`, `HOST`, `PORT`, `DEBUG`. A field added to a group is readable as `settings.<field>`.
+- `.env.example` is the committed contract: every new field gets a default in its group **and** a line there.
+- `main.py` constructs `Settings()` once and wires `settings.name` / `settings.host` / `settings.port` / `settings.debug`.
+- Never hardcode values that belong to configuration, and never instantiate a group class directly; read everything through `Settings`.
+- Keep `src/config/__init__.py` empty: a non-empty non-exempt module must be class-managed, so import `from src.config.settings import Settings` instead of re-exporting.
+
+## External systems
+
+None wired yet — the skeleton has no database, cache, queue, or LLM client. Add each external system here (service, env prefix, client module) as it is introduced.
+
+## Runtime entry points
+
+- `main.py` — composition root; builds the FastAPI app, mounts routers, runs uvicorn on `0.0.0.0:8000`.
+- `main:app` — ASGI target for `uvicorn` and deployments.
+- `src/routers/health.py` — `GET /health`.
+- `make dev` / `make check-all` — Makefile wrappers for the above.
+
+## Agent instructions
+
+This project also follows the [`AGENTS.md`](https://agents.md/) convention:
+
+- `AGENTS.md` is the project-wide coding-agent entrypoint.
+- `agents/` contains progressive-disclosure agent guides. Load only the relevant nested `AGENT.md`.
+- `agents/` is documentation for coding agents; runtime orchestration code lives in `src/agents/`.
+
+## Project-specific glossary
+
+TODO(init-project): add domain terms (instruments, signals, venues, order types, …) as they land in the code.
+
+## Architecture standard
+
+This project follows the layered dependency direction maintained by the [`init-project`](~/.agent/skills/init-project/SKILL.md) skill. Re-run `/init-project` to refresh this document or audit for violations.

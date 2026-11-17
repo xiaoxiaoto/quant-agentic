@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+.ruff_cache/
+.import_linter_cache/
+
+# Virtual environments
+.venv
+
+# Local secrets / overrides
+.env
+
+# macOS
+.DS_Store
+.idea/

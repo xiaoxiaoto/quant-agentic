@@ -1,0 +1,22 @@
+[importlinter]
+root_package = src
+
+[importlinter:contract:layers]
+name = Layered architecture (Types → Config → Repo → Service → Agents → Runtime → Routers)
+type = layers
+layers =
+    src.routers
+    src.runtime
+    src.agents
+    src.services
+    src.repositories
+    src.config
+    src.types
+# `layers` is read top-down: each entry may import any layer LISTED BELOW it.
+# Equivalently, lower layers must not import higher layers.
+# Order maps to the dependency-direction table in SKILL.md (left → right === bottom → top here).
+
+# Add explicit pair-wise exemptions here only when truly unavoidable.
+# Example:
+# ignore_imports =
+#     src.routers.health -> src.runtime.scheduler
