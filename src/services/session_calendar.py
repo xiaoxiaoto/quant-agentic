@@ -129,6 +129,14 @@ class SessionCalendar:
         """周末休市时长（~54.5 小时）。"""
         return 168.0 - self.trading_hours_per_week()
 
+    def get_hours_until_weekend_close(self, dt: datetime) -> float:
+        """获取距离当前交易周闭市（周六 02:30）的剩余小时数。"""
+        close = self.current_session_end(dt)
+        if close is None:
+            return 0.0
+        delta = close - self._to_local(dt)
+        return max(delta.total_seconds() / 3600.0, 0.0)
+
     def add_holidays(self, dates: list[date]) -> None:
         """登记法定节假日或暂停交易日（不可交易）。"""
         self._holidays.update(dates)

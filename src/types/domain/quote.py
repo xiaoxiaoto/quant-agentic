@@ -19,12 +19,24 @@ class QuoteRaw(BaseModel):
     写入后不可篡改。包含原始载荷哈希用于审计追踪。
     """
 
-    quote_id: str
-    source_id: str
-    bid_price: float = Field(description="客户卖出价（银行买入价）")
-    ask_price: float = Field(description="客户买入价（银行卖出价）")
-    quote_at: datetime = Field(description="数据源提供的时间戳（含时区）")
-    received_at: datetime = Field(description="本地系统接收时间戳")
+    quote_id: str = Field(
+        description="报价记录唯一标识",
+    )
+    source_id: str = Field(
+        description="报价数据源标识",
+    )
+    bid_price: float = Field(
+        description="客户卖出价（银行买入价）",
+    )
+    ask_price: float = Field(
+        description="客户买入价（银行卖出价）",
+    )
+    quote_at: datetime = Field(
+        description="数据源提供的时间戳（含时区）",
+    )
+    received_at: datetime = Field(
+        description="本地系统接收时间戳",
+    )
     available_at: datetime | None = Field(
         default=None,
         description="通过数据质量门禁后可用于策略决策的时间戳（PIT 时间链）",
@@ -32,10 +44,22 @@ class QuoteRaw(BaseModel):
     is_tradable: bool = Field(
         description="当前是否处于可交易状态（休市、暂停交易等为 False）",
     )
-    response_code: str | None = None
-    payload_hash: str | None = None
-    quality_state: DataQualityState = DataQualityState.NORMAL
-    product_code: str = "GOLD_ACCUMULATION"
+    response_code: str | None = Field(
+        default=None,
+        description="采集源接口响应状态码",
+    )
+    payload_hash: str | None = Field(
+        default=None,
+        description="原始载荷 SHA-256 哈希值用于审计",
+    )
+    quality_state: DataQualityState = Field(
+        default=DataQualityState.NORMAL,
+        description="数据质量分类状态",
+    )
+    product_code: str = Field(
+        default="GOLD_ACCUMULATION",
+        description="产品代码标识",
+    )
 
 
 class QuoteDerived(BaseModel):
@@ -46,10 +70,18 @@ class QuoteDerived(BaseModel):
     必须以真实银行历史报价校验，严禁以 SGE 或外盘金价替代银行成交价。
     """
 
-    quote_id: str
-    spread: float = Field(description="买卖点差：ask_price − bid_price（元/克）")
-    spread_pct: float = Field(description="点差率：spread / mid_price")
-    mid_price: float = Field(description="中间价：(bid + ask) / 2")
+    quote_id: str = Field(
+        description="关联的原始报价标识",
+    )
+    spread: float = Field(
+        description="买卖点差：ask_price − bid_price（元/克）",
+    )
+    spread_pct: float = Field(
+        description="点差率：spread / mid_price",
+    )
+    mid_price: float = Field(
+        description="中间价：(bid + ask) / 2",
+    )
     intl_ref_cny_per_g: float | None = Field(
         default=None,
         description="国际黄金折合人民币价格：XAUUSD × USDCNH / 31.1034768",
