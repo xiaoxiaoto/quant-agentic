@@ -9,8 +9,14 @@ authors = [
 ]
 dependencies = [
     "fastapi>=0.163.1",
+    "httpx>=0.28.1",
     "jinja2>=3.1.6",
+    "lightgbm>=4.7.0",
+    "numpy>=2.5.5",
+    "pydantic-ai-slim[openai]>=2.70,<3",
     "pydantic-settings>=2.16.3",
+    "scipy>=1.18.1",
+    "timesfm[torch]>=3.0.2,<4",
     "uvicorn>=0.54.0",
 ]
 

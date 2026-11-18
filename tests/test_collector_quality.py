@@ -2,8 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
-from src.services.collector_quality import CollectorQualityAnalyzer
-from src.types.domain.quote import QuoteRaw
+from src.contracts.domains.quote import QuoteRaw
+from src.services.market.collector_quality import CollectorQualityAnalyzer
 
 
 def test_collector_quality_empty() -> None:

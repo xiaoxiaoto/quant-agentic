@@ -1,3 +1,7 @@
+"""Jinja2 提示词模板统一管理器。"""
+
+from __future__ import annotations
+
 import os
 from datetime import datetime
 
@@ -5,6 +9,8 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 
 class PromptTemplateManager:
+    """提示词模板加载与参数渲染管理器。"""
+
     _env = Environment(
         loader=FileSystemLoader(os.path.dirname(__file__)),
         autoescape=select_autoescape(),
@@ -15,6 +21,7 @@ class PromptTemplateManager:
 
     @classmethod
     def _current_time_text(cls) -> str:
+        """格式化当前时间与星期几文本。"""
         now = datetime.now()
         curr = now.strftime("%Y年%m月%d日 %H:%M:%S")
         week = cls._week_list[now.weekday()]
@@ -22,11 +29,12 @@ class PromptTemplateManager:
 
     @classmethod
     def get_prompt_template(cls, prompt_name: str) -> str:
+        """加载并直接渲染无动态参数的提示词模板。"""
         try:
             template = cls._env.get_template(f"{prompt_name}.md.j2")
             return template.render()
         except Exception as e:
-            raise ValueError(f"Error loading template {prompt_name}: {e}")
+            raise ValueError(f"加载提示词模板 {prompt_name} 失败: {e}") from e
 
     @classmethod
     def apply_prompt_template(
@@ -34,6 +42,7 @@ class PromptTemplateManager:
         prompt_name: str,
         **kwargs: object,
     ) -> str:
+        """根据动态参数渲染指定提示词模板，自动注入当前时间。"""
         state_vars = {"CURRENT_TIME": cls._current_time_text(), **kwargs}
 
         try:
@@ -41,4 +50,4 @@ class PromptTemplateManager:
             system_prompt = template.render(**state_vars)
             return system_prompt
         except Exception as e:
-            raise ValueError(f"Error applying template {prompt_name}: {e}")
+            raise ValueError(f"应用提示词模板 {prompt_name} 失败: {e}") from e

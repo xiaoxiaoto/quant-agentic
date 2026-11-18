@@ -130,16 +130,16 @@ For non-exempt modules, avoid top-level business functions. Put behavior on clas
 This project follows a strict 7-layer architecture. Each layer may import any layer to its left; reverse imports are forbidden and are caught by `import-linter` and the AST test under `tests/architecture/`.
 
 ```
-types → config → repositories → services → agents → runtime → routers
+(contracts | configs) → repositories → agents → services → runtime → routers
 ```
 
 | Layer | May import | Purpose |
 | --- | --- | --- |
-| `types` | (nothing in `src/`) | Domain types, Pydantic v2 schemas, enums, domain exceptions |
-| `config` | `types` | Settings (Pydantic Settings), env, constants, logging config |
-| `repositories` | `types`, `config` | SQLAlchemy ORM models + DB access |
-| `services` | `types`, `config`, `repositories` | Business logic |
-| `agents` | `types`, `config`, `repositories`, `services` | Decision / orchestration (LLM tools, planners) |
+| `contracts` | (nothing in `src/`) | Domain types, Pydantic v2 schemas, enums, domain exceptions |
+| `configs` | (nothing in `src/`) | Settings (Pydantic Settings), env, constants, logging config |
+| `repositories` | `contracts`, `configs` | SQLAlchemy ORM models + DB access |
+| `agents` | `contracts`, `configs`, `repositories` | Decision / orchestration (LLM tools, planners) |
+| `services` | `contracts`, `configs`, `repositories`, `agents` | Business logic |
 | `runtime` | all above | Shared execution primitives — DI providers, middleware, lifespan, scheduler, request context. **Must not import `routers`.** |
 | `routers` | all above | HTTP / WebSocket entry points. **Not imported by any layer** — only mounted by `main.py`. |
 | `main.py` | everything | Composition root, lives outside `src/`. Only file allowed to wire every layer. |
@@ -153,18 +153,18 @@ types → config → repositories → services → agents → runtime → router
 
 ## Configuration
 
-- Settings live in `src/config/settings.py`: `Settings(AppSettings, ServerSettings, TradingSettings)` composes the setting groups, so all fields land flat on `Settings`.
+- Settings live in `src/configs/settings.py`: `Settings(AppSettings, ServerSettings, TradingSettings, ModelSettings)` composes the setting groups, so all fields land flat on `Settings`.
 - Values are read from environment variables, falling back to the git-ignored `.env` file (loaded relative to the working directory).
 - Env names are the field names in caps: `NAME`, `HOST`, `PORT`, `DEBUG`. A field added to a group is readable as `settings.<field>`.
 - `.env.example` is the committed contract: every new field gets a default in its group **and** a line there.
 - `main.py` constructs `Settings()` once and wires `settings.name` / `settings.host` / `settings.port` / `settings.debug`.
 - Never hardcode values that belong to configuration, and never instantiate a group class directly; read everything through `Settings`.
-- Keep `src/config/__init__.py` empty: a non-empty non-exempt module must be class-managed, so import `from src.config.settings import Settings` instead of re-exporting.
+- Keep `src/configs/__init__.py` empty: a non-empty non-exempt module must be class-managed, so import `from src.configs.settings import Settings` instead of re-exporting.
 - `main.py` creates `RuntimeDependencies(settings)` once per application. Routers obtain it through FastAPI dependencies; never construct independent ledgers inside routers.
 
 ## External systems
 
-行情保存为 `DATA_DIR` 下的本地 JSONL 文件。账本、提醒、订单状态目前在内存中；没有数据库、缓存、队列、银行连接或真实模型客户端。`TimesFMAdapter` 为动量代理，不能据其名称认定真实模型已经接入。
+行情保存为 `DATA_DIR` 下的本地 JSONL 文件。账本、提醒、新闻事件、订单状态目前在内存中；没有数据库、缓存、队列或银行连接。真实模型与 Agent 入口为 `LightGBMAgent`（训练/加载，位于 `src/agents/lightgbm.py`）、`TimesFMAgent`（官方 TimesFM3 懒加载，位于 `src/agents/timesfm.py`）和 `NewsAgent`（Pydantic AI Agent，位于 `src/agents/news.py`）。模型配置通过 `Settings` 注入应用共享依赖；TimesFM 与 News LLM 默认开启，缺新闻模型配置时启动报错，无 LightGBM 产物时是显式标识的启发式研究模式。不可将适配器已实现等同于真实凭据、生产训练产物或生产授权已就绪。
 
 ## Runtime entry points
 

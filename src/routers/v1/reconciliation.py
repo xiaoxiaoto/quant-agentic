@@ -7,13 +7,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from src.runtime.dependencies import RuntimeDependencies
-from src.services.reconciliation import ReconciliationService
-from src.types.schemas import (
+from src.contracts.schemas import (
     OrdersReconcileRequest,
     SnapshotReconcileRequest,
     SnapshotReconcileResponse,
 )
+from src.runtime.dependencies import RuntimeDependencies
+from src.services.execution.reconciliation import ReconciliationService
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
 _recon_service = ReconciliationService()

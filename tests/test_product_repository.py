@@ -1,7 +1,7 @@
 """产品规则与参数仓储单元测试。"""
 
-from src.repositories.product_repository import ProductRepository
-from src.types.domain.product import FeeRule, ProductConfig, TradeRule
+from src.contracts.domains.product import FeeRule, ProductConfig, TradeRule
+from src.repositories.product import ProductRepository
 
 
 def test_product_repository_defaults() -> None:

@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.services.feasibility import (
+from src.services.decision.feasibility import (
     HOLDING_PERIOD_TRADING_HOURS,
     FeasibilityAnalyzer,
 )

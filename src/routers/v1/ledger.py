@@ -7,8 +7,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from src.contracts.domains.account import AccountSnapshot, OrderEvent
 from src.runtime.dependencies import RuntimeDependencies
-from src.types.domain.account import AccountSnapshot, OrderEvent
 
 router = APIRouter(prefix="/ledger", tags=["ledger"])
 

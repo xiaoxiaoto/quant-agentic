@@ -5,18 +5,18 @@ Use this guide when deciding where code belongs or handling dependency-direction
 ## Layer order
 
 ```text
-types -> config -> repositories -> services -> agents -> runtime -> routers
+(contracts | configs) -> repositories -> agents -> services -> runtime -> routers
 ```
 
 Each layer may import layers to its left. Reverse imports are forbidden.
 
 ## Decisions
 
-- Put pure domain data in `src/types`.
-- Put settings, constants, and logging setup in `src/config`.
+- Put pure domain data in `src/contracts`.
+- Put settings, constants, and logging setup in `src/configs`.
 - Put database access and ORM models in `src/repositories`.
-- Put business rules in `src/services`.
-- Put LLM orchestration and tool wrappers in runtime `src/agents`.
+- Put LLM orchestration, prompts, and tool wrappers in runtime `src/agents`.
+- Put business rules and domain workflows in `src/services`.
 - Put dependency injection, middleware, lifespan, scheduler, and request context in `src/runtime`.
 - Put HTTP and WebSocket entry points in `src/routers`.
 

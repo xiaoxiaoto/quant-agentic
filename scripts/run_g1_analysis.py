@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.services.feasibility import FeasibilityAnalyzer
+from src.services.decision.feasibility import FeasibilityAnalyzer
 
 
 def main() -> None:

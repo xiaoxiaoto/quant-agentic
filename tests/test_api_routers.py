@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from main import app
-from src.config.settings import Settings
+from src.configs.settings import Settings
 from src.runtime.dependencies import RuntimeDependencies
 
 client = TestClient(app)
@@ -16,7 +16,9 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def isolated_runtime(tmp_path: Path) -> Iterator[None]:
-    runtime = RuntimeDependencies(Settings.model_construct(data_dir=str(tmp_path)))
+    runtime = RuntimeDependencies(
+        Settings.model_construct(data_dir=str(tmp_path), timesfm_enabled=False, news_llm_enabled=False)
+    )
     app.dependency_overrides[RuntimeDependencies.from_request] = lambda: runtime
     yield
     app.dependency_overrides.clear()
@@ -277,6 +279,8 @@ def test_runtime_applies_configured_fees_and_quality_threshold(tmp_path: Path) -
     configured = RuntimeDependencies(
         Settings.model_construct(
             data_dir=str(tmp_path / "configured"),
+            timesfm_enabled=False,
+            news_llm_enabled=False,
             buy_fee_rate=0.01,
             sell_fee_rate=0.02,
         )

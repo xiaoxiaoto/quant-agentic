@@ -2,19 +2,18 @@
 root_package = src
 
 [importlinter:contract:layers]
-name = Layered architecture (Types → Config → Repo → Service → Agents → Runtime → Routers)
+name = Layered architecture (Contracts | Configs → Repo → Agents → Services → Runtime → Routers)
 type = layers
 layers =
     src.routers
     src.runtime
-    src.agents
     src.services
+    src.agents
     src.repositories
-    src.config
-    src.types
-# `layers` is read top-down: each entry may import any layer LISTED BELOW it.
-# Equivalently, lower layers must not import higher layers.
-# Order maps to the dependency-direction table in SKILL.md (left → right === bottom → top here).
+    src.contracts | src.configs
+# `layers` 自顶向下读取：每项可导入其下方列出的层。
+# 同一行用 | 分隔的包处于同一层，互不可见。
+# Order: contracts|configs → repositories → agents → services → runtime → routers
 
 # Add explicit pair-wise exemptions here only when truly unavoidable.
 # Example:

@@ -2,9 +2,9 @@
 
 from datetime import UTC, datetime, timedelta
 
-from src.services.shadow_runner import ShadowRunner
-from src.types.domain.product import FeeRule
-from src.types.domain.quote import QuoteRaw
+from src.contracts.domains.product import FeeRule
+from src.contracts.domains.quote import QuoteRaw
+from src.services.execution.shadow_runner import ShadowRunner
 
 
 def test_shadow_runner_full_pipeline() -> None:
@@ -36,10 +36,10 @@ def test_shadow_runner_full_pipeline() -> None:
 def test_shadow_runner_counts_closed_trade_pnl_and_initial_drawdown() -> None:
     from unittest.mock import MagicMock
 
-    from src.services.decision_engine import DecisionEngine
-    from src.services.rfq_execution import RFQExecutionEngine
-    from src.types.domain.decision import Decision
-    from src.types.enums.trading import DecisionAction, HoldingPeriod
+    from src.contracts.domains.decision import Decision
+    from src.contracts.enums.trading import DecisionAction, HoldingPeriod
+    from src.services.decision.decision_engine import DecisionEngine
+    from src.services.execution.rfq_execution import RFQExecutionEngine
 
     base = datetime(2026, 3, 2, 10, tzinfo=UTC)
     prices = [100, 110, 100, 95]
@@ -87,9 +87,9 @@ def test_shadow_runner_counts_closed_trade_pnl_and_initial_drawdown() -> None:
 def test_shadow_runner_uses_visibility_time_and_omits_uncomputed_dsr() -> None:
     from unittest.mock import MagicMock
 
-    from src.services.decision_engine import DecisionEngine
-    from src.types.domain.decision import Decision
-    from src.types.enums.trading import DecisionAction, HoldingPeriod
+    from src.contracts.domains.decision import Decision
+    from src.contracts.enums.trading import DecisionAction, HoldingPeriod
+    from src.services.decision.decision_engine import DecisionEngine
 
     base = datetime(2026, 3, 2, 10, tzinfo=UTC)
     delayed = QuoteRaw(
@@ -131,10 +131,10 @@ def test_shadow_runner_uses_visibility_time_and_omits_uncomputed_dsr() -> None:
 def test_shadow_equity_includes_remaining_position_exit_fee() -> None:
     from unittest.mock import MagicMock
 
-    from src.services.decision_engine import DecisionEngine
-    from src.services.rfq_execution import RFQExecutionEngine
-    from src.types.domain.decision import Decision
-    from src.types.enums.trading import DecisionAction, HoldingPeriod
+    from src.contracts.domains.decision import Decision
+    from src.contracts.enums.trading import DecisionAction, HoldingPeriod
+    from src.services.decision.decision_engine import DecisionEngine
+    from src.services.execution.rfq_execution import RFQExecutionEngine
 
     now = datetime(2026, 3, 2, 10, tzinfo=UTC)
     quote = QuoteRaw(

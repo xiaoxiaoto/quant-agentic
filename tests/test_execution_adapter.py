@@ -4,10 +4,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from src.services.execution_adapter import ExecutionAdapter
-from src.services.shadow_ledger import ShadowLedger
-from src.types.domain.execution import RFQFillResult
-from src.types.enums.trading import OrderState, TradeDirection
+from src.contracts.domains.execution import RFQFillResult
+from src.contracts.enums.trading import OrderState, TradeDirection
+from src.services.execution.execution_adapter import ExecutionAdapter
+from src.services.execution.shadow_ledger import ShadowLedger
 
 
 def test_order_lifecycle_submit_ack_and_fill() -> None:

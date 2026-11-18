@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from src.services.quote_recorder import QuoteRecorder
-from src.types.enums.trading import DataQualityState
+from src.contracts.enums.trading import DataQualityState
+from src.services.market.quote_recorder import QuoteRecorder
 
 
 class TestQuoteRecorder:

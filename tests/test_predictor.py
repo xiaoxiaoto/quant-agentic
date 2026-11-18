@@ -4,9 +4,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from src.services.predictor import ModelPredictor
-from src.types.domain.feature import FeatureSet
-from src.types.enums.trading import HoldingPeriod
+from src.contracts.domains.feature import FeatureSet
+from src.contracts.enums.trading import HoldingPeriod
+from src.services.prediction.predictor import ModelPredictor
 
 
 def test_predictor_confidence_bound() -> None:
@@ -62,8 +62,8 @@ def test_predictor_risk_widens_uncertainty() -> None:
 def test_zero_momentum_includes_both_transaction_fees_and_spread() -> None:
     import pytest
 
-    from src.services.cost_calculator import CostCalculator
-    from src.types.domain.product import FeeRule
+    from src.contracts.domains.product import FeeRule
+    from src.services.decision.cost_calculator import CostCalculator
 
     fee = FeeRule(buy_fee_rate=0.001, sell_fee_rate=0.004)
     feat = FeatureSet(quote_id="flat", as_of=datetime.now(UTC), spread_pct=0.01)
@@ -75,7 +75,7 @@ def test_zero_momentum_includes_both_transaction_fees_and_spread() -> None:
 def test_confidence_level_controls_normal_quantile() -> None:
     from statistics import NormalDist
 
-    from src.types.domain.feature import FeatureSet
+    from src.contracts.domains.feature import FeatureSet
 
     features = FeatureSet(quote_id="confidence", as_of=datetime.now(UTC))
     for confidence in (0.8, 0.99):

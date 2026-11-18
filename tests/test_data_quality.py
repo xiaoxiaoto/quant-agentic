@@ -2,9 +2,9 @@
 
 from datetime import UTC, datetime, timedelta
 
-from src.services.data_quality import DataQualityGuard
-from src.types.domain.quote import QuoteRaw
-from src.types.enums.trading import DataQualityState
+from src.contracts.domains.quote import QuoteRaw
+from src.contracts.enums.trading import DataQualityState
+from src.services.market.data_quality import DataQualityGuard
 
 
 def _make_quote(

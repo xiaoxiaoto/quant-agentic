@@ -7,9 +7,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 
-from src.services.alert_service import AlertService
-from src.types.domain.alert import AlertPayload
-from src.types.enums.trading import AlertState
+from src.contracts.domains.alert import AlertPayload
+from src.contracts.enums.trading import AlertState
+from src.services.risk.alert_service import AlertService
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 _alert_service = AlertService()

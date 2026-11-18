@@ -2,9 +2,9 @@
 
 from datetime import UTC, datetime, timedelta
 
-from src.services.baseline import BaselineEngine
-from src.types.domain.product import FeeRule
-from src.types.domain.quote import QuoteRaw
+from src.contracts.domains.product import FeeRule
+from src.contracts.domains.quote import QuoteRaw
+from src.services.decision.baseline import BaselineEngine
 
 
 def test_cash_only() -> None:
@@ -95,7 +95,7 @@ def test_compare_all() -> None:
 def test_initial_transaction_loss_is_in_max_drawdown() -> None:
     from datetime import UTC, datetime, timedelta
 
-    from src.types.domain.quote import QuoteRaw
+    from src.contracts.domains.quote import QuoteRaw
 
     now = datetime(2026, 3, 2, tzinfo=UTC)
     quotes = [
@@ -115,7 +115,7 @@ def test_initial_transaction_loss_is_in_max_drawdown() -> None:
 
 
 def test_baseline_orders_by_visibility_and_ignores_invalid_quotes() -> None:
-    from src.types.enums.trading import DataQualityState
+    from src.contracts.enums.trading import DataQualityState
 
     now = datetime(2026, 3, 2, tzinfo=UTC)
     first = QuoteRaw(

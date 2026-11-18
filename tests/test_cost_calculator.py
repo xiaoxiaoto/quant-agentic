@@ -4,8 +4,8 @@ import math
 
 import pytest
 
-from src.services.cost_calculator import CostCalculator
-from src.types.domain.product import FeeRule
+from src.contracts.domains.product import FeeRule
+from src.services.decision.cost_calculator import CostCalculator
 
 
 class TestBreakEven:

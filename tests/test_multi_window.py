@@ -1,8 +1,8 @@
 """多窗口动态融合单元测试。"""
 
-from src.services.multi_window import MultiWindowFusion
-from src.types.domain.feature import ModelPrediction
-from src.types.enums.trading import HoldingPeriod
+from src.contracts.domains.feature import ModelPrediction
+from src.contracts.enums.trading import HoldingPeriod
+from src.services.prediction.multi_window import MultiWindowFusion
 
 
 def test_multi_window_disabled_defaults_to_primary() -> None:

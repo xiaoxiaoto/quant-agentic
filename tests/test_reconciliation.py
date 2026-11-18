@@ -2,13 +2,13 @@
 
 from datetime import UTC, datetime
 
-from src.services.reconciliation import ReconciliationService
-from src.types.domain.account import (
+from src.contracts.domains.account import (
     AccountSnapshot,
     BankStatementItem,
     OrderEvent,
 )
-from src.types.enums.trading import OrderState, RiskState, TradeDirection
+from src.contracts.enums.trading import OrderState, RiskState, TradeDirection
+from src.services.execution.reconciliation import ReconciliationService
 
 
 def test_reconcile_snapshot_matched() -> None:

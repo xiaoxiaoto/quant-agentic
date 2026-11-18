@@ -2,8 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
-from src.services.news_risk import NewsRiskEngine
-from src.types.domain.event import MacroCalendarEvent, NewsEvent
+from src.contracts.domains.event import MacroCalendarEvent, NewsEvent
+from src.services.risk.news_risk import NewsRiskEngine
 
 
 def test_macro_calendar_lock() -> None:

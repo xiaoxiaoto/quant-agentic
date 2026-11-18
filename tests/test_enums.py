@@ -2,8 +2,8 @@
 
 import inspect
 
-import src.types.enums.trading as trading_enums
-from src.types.enums.trading import (
+import src.contracts.enums.trading as trading_enums
+from src.contracts.enums.trading import (
     AlertState,
     DataQualityState,
     DecisionAction,

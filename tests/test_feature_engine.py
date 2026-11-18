@@ -2,8 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
-from src.services.feature_engine import FeatureEngine
-from src.types.domain.quote import QuoteRaw
+from src.contracts.domains.quote import QuoteRaw
+from src.services.prediction.feature_engine import FeatureEngine
 
 
 def test_feature_engine_empty() -> None:

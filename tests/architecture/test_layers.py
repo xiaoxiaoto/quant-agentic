@@ -5,9 +5,10 @@ that each ``src.<other-layer>`` import is to a layer this file is allowed to imp
 
 Allowed direction (a layer may import any layer to its left):
 
-    types -> config -> repositories -> services -> agents -> runtime -> routers
+    (contracts | configs) -> repositories -> agents -> services -> runtime -> routers
 
-Equivalently: higher-indexed layers in ``LAYERS`` may depend on lower-indexed
+``contracts`` and ``configs`` are siblings at the same level and must not import each other.
+Equivalently: higher-indexed layers in ``LAYER_ORDER`` may depend on lower-indexed
 layers, never the reverse. Same-layer imports are always allowed.
 
 Catches edge cases that ``import-linter`` misses:
@@ -30,15 +31,28 @@ from __future__ import annotations
 import ast
 import pathlib
 
+# 所有已知层名称（用于识别模块所属层）
 LAYERS: list[str] = [
-    "types",
-    "config",
+    "contracts",
+    "configs",
     "repositories",
-    "services",
     "agents",
+    "services",
     "runtime",
     "routers",
 ]
+
+# 层级顺序：同一 index 的包为同级，可互相不依赖；高 index 层可依赖低 index 层，反之禁止。
+# contracts 与 configs 同处第 0 级，互不可见。
+LAYER_ORDER: dict[str, int] = {
+    "contracts": 0,
+    "configs": 0,
+    "repositories": 1,
+    "agents": 2,
+    "services": 3,
+    "runtime": 4,
+    "routers": 5,
+}
 
 SRC_ROOT: pathlib.Path = pathlib.Path(__file__).resolve().parent.parent.parent / "src"
 
@@ -51,7 +65,7 @@ CLASS_MEMBER_ORDER: dict[str, int] = {
 
 
 def _layer_of(path: pathlib.Path) -> str | None:
-    """Return the layer name for a file under ``src/``, or ``None`` if not in a known layer."""
+    """返回文件所属层名称，不在已知层中则返回 ``None``。"""
     try:
         parts = path.relative_to(SRC_ROOT).parts
     except ValueError:
@@ -59,18 +73,18 @@ def _layer_of(path: pathlib.Path) -> str | None:
     if not parts:
         return None
     head = parts[0]
-    return head if head in LAYERS else None
+    return head if head in LAYER_ORDER else None
 
 
 def _imported_layer(module: str | None) -> str | None:
-    """Return the layer name for a ``src.<layer>...`` import, or ``None``."""
+    """返回 ``src.<layer>...`` 导入语句的层名称，不匹配则返回 ``None``。"""
     if not module or not module.startswith("src."):
         return None
     parts = module.split(".")
     if len(parts) < 2:
         return None
     candidate = parts[1]
-    return candidate if candidate in LAYERS else None
+    return candidate if candidate in LAYER_ORDER else None
 
 
 def _iter_imports(tree: ast.AST) -> list[tuple[str, int]]:
@@ -156,7 +170,7 @@ def test_layered_imports() -> None:
         own = _layer_of(py)
         if own is None:
             continue
-        own_idx = LAYERS.index(own)
+        own_idx = LAYER_ORDER[own]
         try:
             tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
         except SyntaxError as exc:
@@ -166,7 +180,7 @@ def test_layered_imports() -> None:
             target = _imported_layer(module)
             if target is None or target == own:
                 continue
-            target_idx = LAYERS.index(target)
+            target_idx = LAYER_ORDER[target]
             if target_idx >= own_idx:
                 rel = py.relative_to(SRC_ROOT.parent)
                 violations.append(f"{rel}:{lineno}  {own} -> {target}  ({module})")

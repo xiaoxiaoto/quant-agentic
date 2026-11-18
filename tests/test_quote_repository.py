@@ -3,8 +3,8 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from src.repositories.quote_repository import QuoteRepository
-from src.types.domain.quote import QuoteRaw
+from src.contracts.domains.quote import QuoteRaw
+from src.repositories.quote import QuoteRepository
 
 
 def test_quote_repository_save_and_pit_query(tmp_path: Path) -> None:
@@ -130,7 +130,7 @@ def test_verify_file_integrity(tmp_path: Path) -> None:
 
 
 def test_latest_excludes_rejected_quote(tmp_path: Path) -> None:
-    from src.services.quote_recorder import QuoteRecorder
+    from src.services.market.quote_recorder import QuoteRecorder
 
     now = datetime(2026, 3, 2, tzinfo=UTC)
     recorder = QuoteRecorder(tmp_path)
@@ -144,7 +144,7 @@ def test_latest_excludes_rejected_quote(tmp_path: Path) -> None:
 def test_recorder_hash_verifies_all_record_fields(tmp_path: Path) -> None:
     import json
 
-    from src.services.quote_recorder import QuoteRecorder
+    from src.services.market.quote_recorder import QuoteRecorder
 
     now = datetime(2026, 3, 2, tzinfo=UTC)
     QuoteRecorder(tmp_path).record("q", "s", 600.0, 600.5, now, True, raw_payload='{"bid":600}', now=now)

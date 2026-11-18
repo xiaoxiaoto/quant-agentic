@@ -4,12 +4,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from src.services.alert_service import AlertService
-from src.types.domain.account import AccountSnapshot
-from src.types.domain.decision import Decision
-from src.types.domain.product import FeeRule
-from src.types.domain.quote import QuoteRaw
-from src.types.enums.trading import AlertState, DecisionAction, HoldingPeriod
+from src.contracts.domains.account import AccountSnapshot
+from src.contracts.domains.decision import Decision
+from src.contracts.domains.product import FeeRule
+from src.contracts.domains.quote import QuoteRaw
+from src.contracts.enums.trading import AlertState, DecisionAction, HoldingPeriod
+from src.services.risk.alert_service import AlertService
 
 
 def test_create_alert_payload_content() -> None:
@@ -144,7 +144,7 @@ def test_alert_terminal_state_cannot_be_overwritten(operation: str) -> None:
 
 
 def test_alert_uses_shared_fee_calculator_and_decision_expiry() -> None:
-    from src.services.cost_calculator import CostCalculator
+    from src.services.decision.cost_calculator import CostCalculator
 
     now = datetime.now(UTC)
     calc = CostCalculator(FeeRule(buy_fee_rate=0.002, sell_fee_rate=0.01))

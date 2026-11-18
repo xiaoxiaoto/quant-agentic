@@ -9,10 +9,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import AwareDatetime
 
+from src.contracts.domains.quote import QuoteRaw
+from src.contracts.enums.trading import DataQualityState
+from src.contracts.schemas import QuoteIngestRequest
 from src.runtime.dependencies import RuntimeDependencies
-from src.types.domain.quote import QuoteRaw
-from src.types.enums.trading import DataQualityState
-from src.types.schemas import QuoteIngestRequest
 
 router = APIRouter(prefix="/quotes", tags=["quotes"])
 

@@ -5,16 +5,16 @@
 Arrows point in the allowed import direction. A layer may import any layer to its left; reverse imports fail the build.
 
 ```
-types → config → repositories → services → agents → runtime → routers
+(contracts | configs) → repositories → agents → services → runtime → routers
 ```
 
 | Layer | May import | Purpose |
 | --- | --- | --- |
-| `src/types` | (nothing in `src/`) | Domain types, Pydantic v2 schemas, enums, domain exceptions |
-| `src/config` | `types` | Settings (Pydantic Settings), env, constants, logging config |
-| `src/repositories` | `types`, `config` | SQLAlchemy ORM models + DB access |
-| `src/services` | `types`, `config`, `repositories` | Business logic |
-| `src/agents` | `types`, `config`, `repositories`, `services` | Decision / orchestration (LLM tools, planners) |
+| `src/contracts` | (nothing in `src/`) | Domain types, Pydantic v2 schemas, enums, domain exceptions |
+| `src/configs` | (nothing in `src/`) | Settings (Pydantic Settings), env, constants, logging config |
+| `src/repositories` | `contracts`, `configs` | SQLAlchemy ORM models + DB access |
+| `src/agents` | `contracts`, `configs`, `repositories` | Decision / orchestration (LLM tools, planners) |
+| `src/services` | `contracts`, `configs`, `repositories`, `agents` | Business logic |
 | `src/runtime` | all above | DI providers, middleware, lifespan, scheduler, request context |
 | `src/routers` | all above | HTTP / WebSocket entry points |
 | `main.py` | everything | Composition root; lives outside `src/` |
@@ -43,7 +43,7 @@ Both run in `make arch-check` and `make check-all`. A failure means the design i
 
 ## Adding a layer-crossing feature
 
-1. Put the data shape in `src/types`.
+1. Put the data shape in `src/contracts`.
 2. Put the side effect (DB, HTTP call, model call) in the layer that owns it.
 3. Wire concrete implementations in `main.py` or in `src/runtime` providers.
 4. Run `uv run lint-imports && uv run pytest tests/architecture/`.

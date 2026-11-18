@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.services.session_calendar import SessionCalendar
+from src.services.market.session_calendar import SessionCalendar
 
 _SH = ZoneInfo("Asia/Shanghai")
 

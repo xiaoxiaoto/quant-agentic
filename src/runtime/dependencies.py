@@ -7,14 +7,19 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from src.config.settings import Settings
-from src.repositories.quote_repository import QuoteRepository
-from src.services.data_quality import DataQualityGuard
-from src.services.decision_engine import DecisionEngine
-from src.services.predictor import ModelPredictor
-from src.services.risk_engine import RiskEngine
-from src.services.shadow_ledger import ShadowLedger
-from src.types.domain.product import FeeRule
+from src.agents.lightgbm import LightGBMAgent
+from src.agents.news import NewsAgent
+from src.agents.timesfm import TimesFMAgent
+from src.configs.settings import Settings
+from src.contracts.domains.product import FeeRule
+from src.repositories.quote import QuoteRepository
+from src.services.decision.decision_engine import DecisionEngine
+from src.services.execution.shadow_ledger import ShadowLedger
+from src.services.market.data_quality import DataQualityGuard
+from src.services.prediction.feature_engine import FeatureEngine
+from src.services.prediction.predictor import ModelPredictor
+from src.services.risk.news_risk import NewsRiskEngine
+from src.services.risk.risk_engine import RiskEngine
 
 
 class RuntimeDependencies:
@@ -25,10 +30,38 @@ class RuntimeDependencies:
         fee_rule = FeeRule(buy_fee_rate=settings.buy_fee_rate, sell_fee_rate=settings.sell_fee_rate)
         self.ledger = ShadowLedger(fee_rule=fee_rule)
         self.quotes = QuoteRepository(storage_dir=settings.data_dir)
-        self.predictor = ModelPredictor(fee_rule=fee_rule)
-        self.decision = DecisionEngine(fee_rule=fee_rule)
+        self.model = LightGBMAgent(settings.lightgbm_model_dir) if settings.lightgbm_model_dir else None
+        self.timesfm = TimesFMAgent(
+            is_enabled=settings.timesfm_enabled,
+            checkpoint_path=settings.timesfm_checkpoint,
+            device=settings.timesfm_device,
+            context_length=settings.timesfm_context_length,
+        )
+        self.news = NewsRiskEngine()
+        self.news_agent = (
+            NewsAgent(
+                base_url=settings.news_llm_base_url,
+                model=settings.news_llm_model,
+                api_key=settings.news_llm_api_key.get_secret_value(),
+                timeout_seconds=settings.news_llm_timeout_seconds,
+            )
+            if settings.news_llm_enabled
+            else None
+        )
+        self.features = FeatureEngine(timesfm_agent=self.timesfm, news_engine=self.news)
+        self.predictor = ModelPredictor(fee_rule=fee_rule, model=self.model)
+        self.decision = DecisionEngine(fee_rule=fee_rule, news_engine=self.news)
         self.risk = RiskEngine(fee_rule=fee_rule)
         self.quality_guards: dict[tuple[str, str], DataQualityGuard] = {}
+
+    @property
+    def news_llm(self) -> NewsAgent | None:
+        """兼容既有新闻模型引用。"""
+        return self.news_agent
+
+    @news_llm.setter
+    def news_llm(self, value: NewsAgent | None) -> None:
+        self.news_agent = value
 
     @staticmethod
     def from_request(request: Request) -> "RuntimeDependencies":

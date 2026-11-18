@@ -2,9 +2,9 @@
 
 import pytest
 
-from src.services.shadow_ledger import ShadowLedger
-from src.types.domain.product import FeeRule
-from src.types.enums.trading import OrderState, TradeDirection
+from src.contracts.domains.product import FeeRule
+from src.contracts.enums.trading import OrderState, TradeDirection
+from src.services.execution.shadow_ledger import ShadowLedger
 
 
 def test_shadow_ledger_initial_state() -> None:

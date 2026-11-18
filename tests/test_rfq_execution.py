@@ -2,11 +2,11 @@
 
 from datetime import UTC, datetime, timedelta
 
-from src.services.rfq_execution import RFQExecutionEngine
-from src.types.domain.execution import RFQRequest
-from src.types.domain.product import FeeRule
-from src.types.domain.quote import QuoteRaw
-from src.types.enums.trading import TradeDirection
+from src.contracts.domains.execution import RFQRequest
+from src.contracts.domains.product import FeeRule
+from src.contracts.domains.quote import QuoteRaw
+from src.contracts.enums.trading import TradeDirection
+from src.services.execution.rfq_execution import RFQExecutionEngine
 
 
 def test_rfq_execution_success_with_drift() -> None:
@@ -96,7 +96,7 @@ def test_rfq_uses_earliest_quote_from_unsorted_candidates() -> None:
 
 
 def test_rfq_fills_at_observed_time_and_rejects_bad_or_stale_quotes() -> None:
-    from src.types.enums.trading import DataQualityState
+    from src.contracts.enums.trading import DataQualityState
 
     now = datetime(2026, 3, 2, 10, tzinfo=UTC)
     observed = now + timedelta(seconds=5)

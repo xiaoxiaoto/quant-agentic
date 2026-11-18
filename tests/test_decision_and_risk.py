@@ -2,16 +2,16 @@
 
 from datetime import UTC, datetime
 
-from src.services.decision_engine import DecisionEngine
-from src.services.news_risk import NewsRiskEngine
-from src.services.risk_engine import RiskEngine
-from src.types.domain.account import AccountSnapshot
-from src.types.domain.decision import Decision, RiskBudget
-from src.types.domain.event import MacroCalendarEvent
-from src.types.domain.feature import ModelPrediction
-from src.types.domain.product import FeeRule, TradeRule
-from src.types.domain.quote import QuoteRaw
-from src.types.enums.trading import DataQualityState, DecisionAction, HoldingPeriod, RiskState
+from src.contracts.domains.account import AccountSnapshot
+from src.contracts.domains.decision import Decision, RiskBudget
+from src.contracts.domains.event import MacroCalendarEvent
+from src.contracts.domains.feature import ModelPrediction
+from src.contracts.domains.product import FeeRule, TradeRule
+from src.contracts.domains.quote import QuoteRaw
+from src.contracts.enums.trading import DataQualityState, DecisionAction, HoldingPeriod, RiskState
+from src.services.decision.decision_engine import DecisionEngine
+from src.services.risk.news_risk import NewsRiskEngine
+from src.services.risk.risk_engine import RiskEngine
 
 
 def test_decision_data_quality_invalid_abstains() -> None:

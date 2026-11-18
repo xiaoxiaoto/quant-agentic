@@ -81,6 +81,6 @@
 
 ## 4. 签署与生效
 
-- **实施模块**：`src/services/feasibility.py`, `src/services/cost_calculator.py`, `src/services/session_calendar.py`
+- **实施模块**：`src/services/decision/feasibility.py`, `src/services/decision/cost_calculator.py`, `src/services/market/session_calendar.py`
 - **复核状态**：全量单元测试与架构检查已通过（68 tests passed, 0 lint/type issues）。
 - **后续指引**：依本文件结论，阶段 A 告一段落，系统进入**阶段 B（PIT 数据湖、影子账本与基线策略搭建）**。
