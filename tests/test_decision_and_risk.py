@@ -160,3 +160,101 @@ def test_risk_gate_veto_rules() -> None:
     )
     assert v_dec_halt.action == DecisionAction.ABSTAIN
     assert "HALT_RECONCILE_ACTIVE" in violations_halt
+
+
+def test_risk_no_new_risk_blocks_buy_and_resets_target() -> None:
+    snap = AccountSnapshot(cash_available=100000.0, gold_total_g=2.0, gold_available_g=2.0)
+    decision = Decision(
+        decision_id="blocked",
+        decision_at=datetime.now(UTC),
+        action=DecisionAction.BUY,
+        delta_g=1.0,
+        target_inventory_g=3.0,
+        horizon_primary=HoldingPeriod.W1,
+    )
+    approved, _, violations = RiskEngine().check_decision(
+        decision,
+        snap,
+        600.0,
+        599.5,
+        RiskState.NO_NEW_RISK,
+    )
+    assert approved.action == DecisionAction.ABSTAIN
+    assert approved.target_inventory_g == snap.gold_total_g
+    assert violations
+    assert decision.action == DecisionAction.BUY
+
+
+def test_risk_rejects_invalid_trade_direction_and_prices() -> None:
+    snap = AccountSnapshot(cash_available=100000.0, gold_total_g=2.0, gold_available_g=2.0)
+    for delta, ask, bid in [(1.0, 600.0, 599.5), (-1.0, 0.0, 0.0), (-1.0, float("nan"), 600.0)]:
+        decision = Decision(
+            decision_id="invalid",
+            decision_at=datetime.now(UTC),
+            action=DecisionAction.SELL,
+            delta_g=delta,
+            target_inventory_g=1.0,
+            horizon_primary=HoldingPeriod.W1,
+        )
+        approved, _, violations = RiskEngine().check_decision(decision, snap, ask, bid)
+        assert approved.action == DecisionAction.ABSTAIN
+        assert approved.delta_g == 0.0
+        assert approved.target_inventory_g == snap.gold_total_g
+        assert violations
+
+
+def test_risk_enforces_configured_exposure_limit() -> None:
+    snap = AccountSnapshot(cash_available=10000.0)
+    decision = Decision(
+        decision_id="exposure",
+        decision_at=datetime.now(UTC),
+        action=DecisionAction.BUY,
+        delta_g=2.0,
+        target_inventory_g=2.0,
+        horizon_primary=HoldingPeriod.W1,
+    )
+    risk = RiskEngine(risk_budget=RiskBudget(max_gold_exposure_pct=0.1))
+    approved, _, violations = risk.check_decision(decision, snap, 600.0, 599.5)
+    assert approved.action == DecisionAction.ABSTAIN
+    assert "MAX_GOLD_EXPOSURE_EXCEEDED" in violations
+
+
+def test_decision_partial_exit_preserves_frozen_inventory() -> None:
+    trade_time = datetime(2026, 3, 3, 10, 0, tzinfo=UTC)
+    quote = QuoteRaw(
+        quote_id="partial",
+        source_id="src",
+        bid_price=600.0,
+        ask_price=600.5,
+        quote_at=trade_time,
+        received_at=trade_time,
+        is_tradable=True,
+    )
+    predictions = {
+        HoldingPeriod.W1: ModelPrediction(
+            horizon=HoldingPeriod.W1, expected_net_return=-0.02, net_return_lcb=-0.03, win_probability=0.1
+        )
+    }
+    snap = AccountSnapshot(gold_total_g=3.0, gold_available_g=2.0, gold_frozen_g=1.0)
+    decision = DecisionEngine().evaluate_decision(quote, predictions, snap)
+    assert decision.delta_g == -2.0
+    assert decision.target_inventory_g == 1.0
+    assert decision.expected_cost is not None
+    assert decision.expected_cost < 0.01
+
+
+def test_decision_missing_predictions_abstains() -> None:
+    now = datetime(2026, 3, 3, 10, 0, tzinfo=UTC)
+    quote = QuoteRaw(
+        quote_id="empty",
+        source_id="src",
+        bid_price=600.0,
+        ask_price=600.5,
+        quote_at=now,
+        received_at=now,
+        is_tradable=True,
+    )
+    decision = DecisionEngine().evaluate_decision(quote, {}, AccountSnapshot(gold_total_g=2.0))
+    assert decision.action == DecisionAction.ABSTAIN
+    assert decision.target_inventory_g == 2.0
+    assert decision.reason_codes == ["NO_VALID_PREDICTIONS"]

@@ -79,7 +79,7 @@ class DataQualityGuard:
                 return DataQualityState.ANOMALY
 
         # 7. 报价陈旧检测（相对当前系统时钟）
-        quote_age = (current_time - quote.received_at).total_seconds()
+        quote_age = (current_time - min(quote.quote_at, quote.received_at)).total_seconds()
         if quote_age > self._stale_threshold_seconds:
             return DataQualityState.STALE
 
@@ -95,7 +95,7 @@ class DataQualityGuard:
     ) -> bool:
         """检查已有有效报价在当前时刻是否已超时陈旧。"""
         now = current_time or self._now()
-        age = (now - quote.received_at).total_seconds()
+        age = (now - min(quote.quote_at, quote.received_at)).total_seconds()
         return age > self._stale_threshold_seconds
 
     def reset(self) -> None:

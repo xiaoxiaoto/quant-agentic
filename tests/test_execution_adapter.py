@@ -93,3 +93,19 @@ def test_batch_order_execution_mechanism() -> None:
     can_fill_2, res_2 = adapter.execute_batch_at_open("inst_02", bank_batch_price=603.0)
     assert can_fill_2 is False
     assert res_2.is_executed is False
+
+
+def test_fill_replay_is_idempotent_and_booking_failure_is_not_filled() -> None:
+    ledger = ShadowLedger(initial_cash=1000)
+    adapter = ExecutionAdapter(ledger=ledger)
+    adapter.submit_order("repeat", TradeDirection.BUY, 1)
+    fill = RFQFillResult(fill_id="fill", request_id="req", is_filled=True, filled_price=100, filled_grams=1)
+    adapter.process_fill("repeat", fill)
+    adapter.process_fill("repeat", fill)
+    assert ledger.take_snapshot().gold_total_g == 1
+    adapter.submit_order("expensive", TradeDirection.BUY, 20)
+    with pytest.raises(ValueError):
+        adapter.process_fill("expensive", fill.model_copy(update={"fill_id": "other", "filled_grams": 20}))
+    order = adapter.query_order("expensive")
+    assert order is not None
+    assert order.state != OrderState.FILLED

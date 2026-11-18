@@ -19,11 +19,14 @@ class FeeRule(BaseModel):
     buy_fee_rate: float = Field(
         default=0.0,
         ge=0.0,
+        allow_inf_nan=False,
         description="买入费率（当前优惠费率为 0%，可随公告调整）",
     )
     sell_fee_rate: float = Field(
         default=0.004,
+        lt=1.0,
         ge=0.0,
+        allow_inf_nan=False,
         description="卖出费率（0.4% = 40bp，以卖出成交金额为基数扣除）",
     )
     effective_from: datetime | None = Field(

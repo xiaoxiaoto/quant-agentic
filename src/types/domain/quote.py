@@ -52,6 +52,10 @@ class QuoteRaw(BaseModel):
         default=None,
         description="原始载荷 SHA-256 哈希值用于审计",
     )
+    record_hash: str | None = Field(
+        default=None,
+        description="完整记录的规范化 SHA-256 哈希值",
+    )
     quality_state: DataQualityState = Field(
         default=DataQualityState.NORMAL,
         description="数据质量分类状态",

@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
 from src.services.predictor import ModelPredictor
 from src.types.domain.feature import FeatureSet
 from src.types.enums.trading import HoldingPeriod
@@ -55,3 +57,30 @@ def test_predictor_risk_widens_uncertainty() -> None:
     assert pred_risk.uncertainty > pred_norm.uncertainty
     # 高不确定性压低了置信下界
     assert pred_risk.net_return_lcb < pred_norm.net_return_lcb
+
+
+def test_zero_momentum_includes_both_transaction_fees_and_spread() -> None:
+    import pytest
+
+    from src.services.cost_calculator import CostCalculator
+    from src.types.domain.product import FeeRule
+
+    fee = FeeRule(buy_fee_rate=0.001, sell_fee_rate=0.004)
+    feat = FeatureSet(quote_id="flat", as_of=datetime.now(UTC), spread_pct=0.01)
+    prediction = ModelPredictor(fee_rule=fee).predict(feat)
+    expected = CostCalculator(fee).net_return(1.005, 0.995)
+    assert prediction.expected_net_return == pytest.approx(expected, abs=1e-6)
+
+
+def test_confidence_level_controls_normal_quantile() -> None:
+    from statistics import NormalDist
+
+    from src.types.domain.feature import FeatureSet
+
+    features = FeatureSet(quote_id="confidence", as_of=datetime.now(UTC))
+    for confidence in (0.8, 0.99):
+        prediction = ModelPredictor(confidence_level=confidence, base_uncertainty=0.01).predict(features)
+        assert prediction.net_return_lcb == pytest.approx(
+            prediction.expected_net_return - NormalDist().inv_cdf(confidence) * 0.01,
+            abs=1e-6,
+        )

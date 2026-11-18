@@ -58,3 +58,16 @@ def test_multi_window_enabled_selects_optimal_lcb() -> None:
 
     score = fusion.compute_fused_score(preds)
     assert score > 0.0
+
+
+def test_fusion_rejects_empty_or_disallowed_predictions() -> None:
+    import pytest
+
+    fusion = MultiWindowFusion(is_enabled=True)
+    with pytest.raises(ValueError):
+        fusion.select_primary_horizon({})
+    hourly = ModelPrediction(horizon=HoldingPeriod.H1, expected_net_return=0.5, net_return_lcb=0.4, win_probability=0.9)
+    with pytest.raises(ValueError):
+        fusion.select_primary_horizon({HoldingPeriod.H1: hourly})
+    with pytest.raises(ValueError):
+        MultiWindowFusion().select_primary_horizon({HoldingPeriod.H1: hourly})

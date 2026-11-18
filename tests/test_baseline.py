@@ -90,3 +90,104 @@ def test_compare_all() -> None:
     assert "BUY_AND_HOLD" in strat_names
     assert "DCA" in strat_names
     assert report.best_strategy in strat_names
+
+
+def test_initial_transaction_loss_is_in_max_drawdown() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from src.types.domain.quote import QuoteRaw
+
+    now = datetime(2026, 3, 2, tzinfo=UTC)
+    quotes = [
+        QuoteRaw(
+            quote_id=str(i),
+            source_id="s",
+            bid_price=600,
+            ask_price=601,
+            quote_at=now + timedelta(days=i),
+            received_at=now + timedelta(days=i),
+            is_tradable=True,
+        )
+        for i in range(2)
+    ]
+    result = BaselineEngine().run_buy_and_hold(quotes)
+    assert result.max_drawdown_pct == -result.total_return_pct
+
+
+def test_baseline_orders_by_visibility_and_ignores_invalid_quotes() -> None:
+    from src.types.enums.trading import DataQualityState
+
+    now = datetime(2026, 3, 2, tzinfo=UTC)
+    first = QuoteRaw(
+        quote_id="first",
+        source_id="s",
+        bid_price=600,
+        ask_price=601,
+        quote_at=now + timedelta(days=1),
+        received_at=now,
+        is_tradable=True,
+    )
+    last = first.model_copy(
+        update={
+            "quote_id": "last",
+            "bid_price": 660,
+            "ask_price": 661,
+            "quote_at": now,
+            "received_at": now + timedelta(days=1),
+        }
+    )
+    invalid = [
+        first.model_copy(update=changes)
+        for changes in (
+            {"quality_state": DataQualityState.ANOMALY},
+            {"bid_price": -1},
+            {"ask_price": 0},
+            {"bid_price": float("nan")},
+            {"ask_price": float("inf")},
+            {"is_tradable": False},
+        )
+    ]
+    engine = BaselineEngine()
+    for runner in (engine.run_buy_and_hold, engine.run_dca):
+        expected = runner([first, last])
+        actual = runner([last, *invalid, first])
+        assert actual == expected
+        assert actual.total_return_pct > 0
+
+
+def test_dca_rejects_nonpositive_interval() -> None:
+    import pytest
+
+    for interval in (0, -1):
+        with pytest.raises(ValueError):
+            BaselineEngine().run_dca([], step_intervals=interval)
+
+
+def test_sharpe_annualization_uses_observed_interval() -> None:
+    import math
+
+    import pytest
+
+    now = datetime(2026, 3, 2, tzinfo=UTC)
+    quotes = [
+        QuoteRaw(
+            quote_id=str(i),
+            source_id="s",
+            bid_price=price,
+            ask_price=price,
+            quote_at=now + timedelta(hours=i),
+            received_at=now + timedelta(hours=i),
+            is_tradable=True,
+        )
+        for i, price in enumerate((600, 606, 603, 612))
+    ]
+    daily = [
+        q.model_copy(update={"quote_at": now + timedelta(days=i), "received_at": now + timedelta(days=i)})
+        for i, q in enumerate(quotes)
+    ]
+    engine = BaselineEngine(fee_rule=FeeRule(sell_fee_rate=0), annual_risk_free_rate=0)
+    hourly_sharpe = engine.run_buy_and_hold(quotes).sharpe_ratio
+    daily_sharpe = engine.run_buy_and_hold(daily).sharpe_ratio
+    assert hourly_sharpe is not None
+    assert daily_sharpe is not None
+    assert hourly_sharpe / daily_sharpe == pytest.approx(math.sqrt(24), abs=1e-4)

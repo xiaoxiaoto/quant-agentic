@@ -1,27 +1,32 @@
 """核心模型预测服务。
 
-实现基于特征输入的净收益率点预测、置信区间下界（LCB）估计与校准胜率。
+提供基于固定权重的启发式净收益、置信下界与胜率代理，尚未训练或校准。
 严格以扣除交易与退出成本后的期望净收益下界作为交易决策依据。
 """
 
 import math
+from statistics import NormalDist
 
+from src.services.cost_calculator import CostCalculator
 from src.types.domain.feature import FeatureSet, ModelPrediction
+from src.types.domain.product import FeeRule
 from src.types.enums.trading import HoldingPeriod
 
 
 class ModelPredictor:
-    """核心模型预测引擎。"""
+    """启发式预测原型，各持有期暂共用同一打分公式。"""
 
     def __init__(
         self,
         confidence_level: float = 0.90,
         base_uncertainty: float = 0.008,
+        fee_rule: FeeRule | None = None,
     ) -> None:
-        self._confidence_level = confidence_level
+        self._cost = CostCalculator(fee_rule)
         self._base_uncertainty = base_uncertainty
-        # 90% 置信区间单侧分位数 z ≈ 1.282，95% ≈ 1.645
-        self._z_score = 1.282 if confidence_level <= 0.90 else 1.645
+        if not 0.5 < confidence_level < 1.0 or not math.isfinite(base_uncertainty) or base_uncertainty <= 0:
+            raise ValueError("单侧置信水平须介于0.5与1之间，不确定性须为有限正数")
+        self._z_score = NormalDist().inv_cdf(confidence_level)
 
     def _sigmoid(self, x: float) -> float:
         return 1.0 / (1.0 + math.exp(-max(min(x, 20.0), -20.0)))
@@ -57,8 +62,12 @@ class ModelPredictor:
         # 粗预测净收益
         raw_net_return = mom_score * 0.6 + timesfm_contrib + basis_contrib
 
-        # 点差成本扣减
-        raw_net_return -= features.spread_pct
+        # 将中间价收益转换为含双边点差与手续费的实际往返收益。
+        half_spread = features.spread_pct / 2.0
+        raw_net_return = self._cost.net_return(
+            entry_ask=1.0 + half_spread,
+            exit_bid=(1.0 - half_spread) * (1.0 + raw_net_return),
+        )
 
         # 动态估计不确定性
         uncertainty = self._base_uncertainty * vol_factor
@@ -68,7 +77,7 @@ class ModelPredictor:
         # 计算置信区间下界 LCB = E[r] - z * sigma
         lcb = raw_net_return - self._z_score * uncertainty
 
-        # 校准胜率计算 (基于标准正态累积分布的 logit 近似)
+        # 基于标准化打分的胜率代理，未经样本外校准
         z_win = raw_net_return / uncertainty if uncertainty > 0 else 0.0
         win_prob = self._sigmoid(z_win * 1.5)
 

@@ -118,10 +118,105 @@ def test_verify_file_integrity(tmp_path: Path) -> None:
         payload_hash="invalid_hash_value",
     )
 
-    repo.save_quote(q_valid)
-    repo.save_quote(q_corrupt)
-
     file_path = tmp_path / f"quotes_{base_t.strftime('%Y-%m-%d')}.jsonl"
+    import json
+
+    file_path.write_text(
+        "\n".join(json.dumps(q.model_dump(mode="json", exclude={"record_hash"})) for q in (q_valid, q_corrupt)) + "\n"
+    )
     valid, corrupt = repo.verify_file_integrity(file_path)
     assert valid == 1
     assert corrupt == 1
+
+
+def test_latest_excludes_rejected_quote(tmp_path: Path) -> None:
+    from src.services.quote_recorder import QuoteRecorder
+
+    now = datetime(2026, 3, 2, tzinfo=UTC)
+    recorder = QuoteRecorder(tmp_path)
+    recorder.record("good", "s", 600.0, 600.5, now, True, now=now)
+    recorder.record("bad", "s", -1.0, 600.5, now, True, now=now)
+    latest = QuoteRepository(tmp_path).get_latest_as_of(now)
+    assert latest is not None
+    assert latest.quote_id == "good"
+
+
+def test_recorder_hash_verifies_all_record_fields(tmp_path: Path) -> None:
+    import json
+
+    from src.services.quote_recorder import QuoteRecorder
+
+    now = datetime(2026, 3, 2, tzinfo=UTC)
+    QuoteRecorder(tmp_path).record("q", "s", 600.0, 600.5, now, True, raw_payload='{"bid":600}', now=now)
+    repo = QuoteRepository(tmp_path)
+    path = next(tmp_path.glob("*.jsonl"))
+    assert repo.verify_file_integrity(path) == (1, 0)
+    record = json.loads(path.read_text())
+    record["is_tradable"] = False
+    path.write_text(json.dumps(record) + "\n")
+    assert repo.verify_file_integrity(path) == (0, 1)
+
+
+def test_pit_excludes_future_source_timestamp(tmp_path: Path) -> None:
+    now = datetime(2026, 3, 2, tzinfo=UTC)
+    quote = QuoteRaw(
+        quote_id="future",
+        source_id="s",
+        bid_price=600,
+        ask_price=601,
+        quote_at=now + timedelta(hours=1),
+        received_at=now,
+        available_at=now,
+        is_tradable=True,
+    )
+    repo = QuoteRepository(tmp_path)
+    repo.save_quote(quote)
+    assert repo.get_latest_as_of(now) is None
+    assert repo.query_pit_series(now, now + timedelta(hours=1), as_of=now) == []
+
+
+def test_late_old_quote_does_not_replace_latest_source_quote(tmp_path: Path) -> None:
+    now = datetime(2026, 3, 2, tzinfo=UTC)
+    newest = QuoteRaw(
+        quote_id="newest",
+        source_id="s",
+        bid_price=610,
+        ask_price=611,
+        quote_at=now,
+        received_at=now,
+        available_at=now,
+        is_tradable=True,
+    )
+    late_old = newest.model_copy(
+        update={
+            "quote_id": "old",
+            "quote_at": now - timedelta(hours=1),
+            "received_at": now + timedelta(minutes=1),
+            "available_at": now + timedelta(minutes=1),
+        }
+    )
+    repo = QuoteRepository(tmp_path)
+    repo.save_quote(newest)
+    repo.save_quote(late_old)
+    latest = repo.get_latest_as_of(now + timedelta(minutes=2))
+    assert latest is not None
+    assert latest.quote_id == "newest"
+    replay = list(repo.iter_replay(now - timedelta(hours=2), now + timedelta(minutes=2)))
+    assert [q.quote_id for q in replay] == ["newest", "old"]
+
+
+def test_pit_does_not_use_availability_before_received_at(tmp_path: Path) -> None:
+    now = datetime(2026, 3, 2, tzinfo=UTC)
+    quote = QuoteRaw(
+        quote_id="delayed",
+        source_id="s",
+        bid_price=600,
+        ask_price=601,
+        quote_at=now,
+        received_at=now + timedelta(minutes=1),
+        available_at=now,
+        is_tradable=True,
+    )
+    repo = QuoteRepository(tmp_path)
+    repo.save_quote(quote)
+    assert repo.get_latest_as_of(now) is None

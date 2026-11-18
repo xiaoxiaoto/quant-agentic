@@ -125,3 +125,46 @@ def test_reconcile_orders_unmatched_and_discrepancies() -> None:
     assert risk == RiskState.HALT_RECONCILE
     assert len(report.discrepancies) >= 1
     assert "bid_extra" in report.unmatched_bank_orders
+
+
+def test_order_fee_and_status_differences_are_detected() -> None:
+    now = datetime.now(UTC)
+    local = OrderEvent(
+        client_order_id="c",
+        bank_order_id="b",
+        direction=TradeDirection.BUY,
+        requested_grams=1,
+        filled_grams=1,
+        execution_price=100,
+        fee=0,
+        state=OrderState.FILLED,
+    )
+    bank = BankStatementItem(
+        bank_order_id="b", direction=TradeDirection.BUY, grams=1, price=100, fee=5, status="FAILED", executed_at=now
+    )
+    report, risk = ReconciliationService().reconcile_orders([local], [bank])
+    assert not report.matched
+    assert risk == RiskState.HALT_RECONCILE
+
+
+def test_duplicate_bank_identifiers_fail_reconciliation() -> None:
+    now = datetime.now(UTC)
+    local = OrderEvent(
+        client_order_id="c",
+        bank_order_id="b",
+        direction=TradeDirection.BUY,
+        requested_grams=1,
+        filled_grams=1,
+        execution_price=100,
+        fee=0,
+        state=OrderState.FILLED,
+    )
+    bank = BankStatementItem(
+        bank_order_id="b", client_order_id="c", direction=TradeDirection.BUY, grams=1, price=100, executed_at=now
+    )
+    report, _ = ReconciliationService().reconcile_orders([local], [bank.model_copy(update={"grams": 10}), bank])
+    assert not report.matched
+    report, _ = ReconciliationService().reconcile_orders(
+        [local], [bank, bank.model_copy(update={"bank_order_id": "b2"})]
+    )
+    assert not report.matched

@@ -168,19 +168,9 @@ class FeasibilityAnalyzer:
         trading_hours_per_year: float = 6318.0,
     ) -> FeasibilityRow:
         """测算单个 持有周期 × 点差假设 的可行性行。"""
-        hours = HOLDING_PERIOD_TRADING_HOURS[holding_period]
-        sigma_h = annual_volatility * math.sqrt(hours / trading_hours_per_year)
-        move_m = CostCalculator.typical_absolute_move(annual_volatility, hours, trading_hours_per_year)
-        total_cost = self._cost_calc.total_round_trip_cost_pct(spread_pct)
-        p_star = self._cost_calc.required_accuracy(total_cost, move_m)
-
-        return FeasibilityRow(
-            holding_period=holding_period,
-            trading_hours=hours,
-            sigma_h=sigma_h,
-            typical_move_m=move_m,
-            spread_pct=spread_pct,
-            total_cost_pct=total_cost,
-            required_accuracy=p_star,
-            assessment=self._assess(p_star),
-        )
+        return self.analyze(
+            annual_volatility=annual_volatility,
+            trading_hours_per_year=trading_hours_per_year,
+            holding_periods=(holding_period,),
+            spread_scenarios=(spread_pct,),
+        ).rows[0]

@@ -3,10 +3,12 @@
 执行影子账本与银行官方账目、流水的核对，输出一致性校验结果。
 """
 
-from fastapi import APIRouter
+from typing import Annotated
 
+from fastapi import APIRouter, Depends
+
+from src.runtime.dependencies import RuntimeDependencies
 from src.services.reconciliation import ReconciliationService
-from src.services.shadow_ledger import ShadowLedger
 from src.types.schemas import (
     OrdersReconcileRequest,
     SnapshotReconcileRequest,
@@ -15,13 +17,15 @@ from src.types.schemas import (
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
 _recon_service = ReconciliationService()
-_ledger = ShadowLedger()
 
 
 @router.post("/snapshot", response_model=SnapshotReconcileResponse)
-def reconcile_snapshot(payload: SnapshotReconcileRequest) -> SnapshotReconcileResponse:
+def reconcile_snapshot(
+    payload: SnapshotReconcileRequest,
+    runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
+) -> SnapshotReconcileResponse:
     """核对当前本地影子账本快照与银行官方资产。"""
-    local_snap = _ledger.take_snapshot()
+    local_snap = runtime.ledger.take_snapshot()
     report, risk = _recon_service.reconcile_snapshot(
         local_snapshot=local_snap,
         bank_cash=payload.bank_cash,
@@ -38,8 +42,8 @@ def reconcile_snapshot(payload: SnapshotReconcileRequest) -> SnapshotReconcileRe
 def reconcile_orders(payload: OrdersReconcileRequest) -> SnapshotReconcileResponse:
     """逐笔核对本地订单流水与银行官方交易流水。"""
     report, risk = _recon_service.reconcile_orders(
-        local_orders=payload.local_orders,
-        bank_statements=payload.bank_statements,
+        local_orders=list(payload.local_orders),
+        bank_statements=list(payload.bank_statements),
     )
     return SnapshotReconcileResponse(
         report=report,

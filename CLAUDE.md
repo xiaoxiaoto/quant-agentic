@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project — quant-agentic
 
-TODO(init-project): add one sentence describing what this project does.
+积存黄金研究与影子交易后端：行情校验、PIT 回放、启发式决策、风控、模拟记账与对账。当前能力边界见 README。
 
 ## Commands
 
@@ -153,17 +153,18 @@ types → config → repositories → services → agents → runtime → router
 
 ## Configuration
 
-- Settings live in `src/config/settings.py`: `Settings(AppSettings, ServerSettings)` composes two `BaseSettings` subclasses, so all fields land flat on `Settings`.
-- Values are read from environment variables, overridden by the git-ignored `.env` file (loaded relative to the working directory).
+- Settings live in `src/config/settings.py`: `Settings(AppSettings, ServerSettings, TradingSettings)` composes the setting groups, so all fields land flat on `Settings`.
+- Values are read from environment variables, falling back to the git-ignored `.env` file (loaded relative to the working directory).
 - Env names are the field names in caps: `NAME`, `HOST`, `PORT`, `DEBUG`. A field added to a group is readable as `settings.<field>`.
 - `.env.example` is the committed contract: every new field gets a default in its group **and** a line there.
 - `main.py` constructs `Settings()` once and wires `settings.name` / `settings.host` / `settings.port` / `settings.debug`.
 - Never hardcode values that belong to configuration, and never instantiate a group class directly; read everything through `Settings`.
 - Keep `src/config/__init__.py` empty: a non-empty non-exempt module must be class-managed, so import `from src.config.settings import Settings` instead of re-exporting.
+- `main.py` creates `RuntimeDependencies(settings)` once per application. Routers obtain it through FastAPI dependencies; never construct independent ledgers inside routers.
 
 ## External systems
 
-None wired yet — the skeleton has no database, cache, queue, or LLM client. Add each external system here (service, env prefix, client module) as it is introduced.
+行情保存为 `DATA_DIR` 下的本地 JSONL 文件。账本、提醒、订单状态目前在内存中；没有数据库、缓存、队列、银行连接或真实模型客户端。`TimesFMAdapter` 为动量代理，不能据其名称认定真实模型已经接入。
 
 ## Runtime entry points
 

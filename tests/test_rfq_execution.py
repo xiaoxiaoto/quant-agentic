@@ -80,3 +80,43 @@ def test_rfq_execution_no_eligible_quotes() -> None:
     fill = engine.simulate_execution(req, quotes)
     assert fill.is_filled is False
     assert fill.rejection_reason == "NO_ELIGIBLE_QUOTES_AFTER_DELAY"
+
+
+def test_rfq_uses_earliest_quote_from_unsorted_candidates() -> None:
+    now = datetime(2026, 3, 2, 10, tzinfo=UTC)
+    request = RFQRequest(request_id="r", direction=TradeDirection.BUY, grams=1, decision_time=now, eligible_at=now)
+    early = QuoteRaw(
+        quote_id="early", source_id="s", bid_price=100, ask_price=101, quote_at=now, received_at=now, is_tradable=True
+    )
+    late = early.model_copy(update={"quote_id": "late", "quote_at": now + timedelta(seconds=10), "ask_price": 200})
+    result = RFQExecutionEngine().simulate_execution(request, [late, early])
+    assert result.filled_at == now
+    assert result.filled_price is not None
+    assert result.filled_price < 102
+
+
+def test_rfq_fills_at_observed_time_and_rejects_bad_or_stale_quotes() -> None:
+    from src.types.enums.trading import DataQualityState
+
+    now = datetime(2026, 3, 2, 10, tzinfo=UTC)
+    observed = now + timedelta(seconds=5)
+    request = RFQRequest(
+        request_id="r", direction=TradeDirection.BUY, grams=1, decision_time=observed, eligible_at=observed
+    )
+    quote = QuoteRaw(
+        quote_id="late",
+        source_id="s",
+        bid_price=100,
+        ask_price=101,
+        quote_at=now,
+        received_at=observed,
+        is_tradable=True,
+    )
+    engine = RFQExecutionEngine(max_quote_age_seconds=10)
+    assert engine.simulate_execution(request, [quote]).filled_at == observed
+    assert not engine.simulate_execution(
+        request, [quote.model_copy(update={"quality_state": DataQualityState.ANOMALY})]
+    ).is_filled
+    assert not engine.simulate_execution(
+        request, [quote.model_copy(update={"received_at": now + timedelta(seconds=20)})]
+    ).is_filled

@@ -27,8 +27,7 @@ class AlertService:
         fee_rule: FeeRule | None = None,
     ) -> None:
         self._validity_m: float = default_validity_minutes
-        self._calculator: CostCalculator = cost_calculator or CostCalculator()
-        self._fee_rule: FeeRule = fee_rule or FeeRule()
+        self._calculator: CostCalculator = cost_calculator or CostCalculator(fee_rule)
         self._alerts: dict[str, AlertPayload] = {}
 
     def _now(self) -> datetime:
@@ -43,8 +42,7 @@ class AlertService:
         """根据买卖费率与当前价格计算保本盈亏平衡目标价。"""
         if action == DecisionAction.BUY:
             # 买入保本价 = 买入成本 ÷ (1 - 卖出费率)
-            f_sell = self._fee_rule.sell_fee_rate
-            return round(current_ask / (1.0 - f_sell), 4) if f_sell < 1.0 else current_ask
+            return round(self._calculator.break_even_bid(current_ask), 4)
         elif action == DecisionAction.SELL:
             return round(current_bid, 4)
         return round((current_bid + current_ask) / 2.0, 4)
@@ -57,8 +55,7 @@ class AlertService:
     ) -> float:
         """计算每克预估综合净退出损失金额。"""
         spread_pct = spread / current_ask if current_ask > 0 else 0.0
-        total_loss_rate = stop_loss_pct + spread_pct + self._fee_rule.sell_fee_rate
-        return round(current_ask * total_loss_rate, 4)
+        return round(self._calculator.net_exit_loss_per_gram(current_ask, stop_loss_pct, spread_pct), 4)
 
     def create_alert(
         self,
@@ -75,8 +72,10 @@ class AlertService:
             return None
 
         now_dt = self._now()
-        val_m = validity_minutes or self._validity_m
+        val_m = self._validity_m if validity_minutes is None else validity_minutes
         expires_at = now_dt + timedelta(minutes=val_m)
+        if decision.expires_at is not None:
+            expires_at = min(expires_at, decision.expires_at)
         alert_id = f"alt_{uuid.uuid4().hex[:10]}"
 
         spread = round(quote.ask_price - quote.bid_price, 4)
@@ -109,6 +108,8 @@ class AlertService:
         alert = self.get_alert(alert_id)
         if not alert:
             raise KeyError(f"未找到指定的提醒条目：{alert_id}")
+        if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
+            raise ValueError(f"当前提醒状态不可确认为意向：{alert.state.value}")
         if self.is_expired(alert):
             alert.state = AlertState.EXPIRED
             raise ValueError(f"提醒已过有效期：{alert_id}")
@@ -124,6 +125,8 @@ class AlertService:
         alert = self.get_alert(alert_id)
         if not alert:
             raise KeyError(f"未找到指定的提醒条目：{alert_id}")
+        if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
+            raise ValueError(f"当前提醒状态不可拒绝建议：{alert.state.value}")
         alert.state = AlertState.USER_DECLINED
         return alert
 
@@ -135,6 +138,9 @@ class AlertService:
         if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
             raise ValueError(f"当前提醒状态不可标记为已执行：{alert.state.value}")
 
+        if self.is_expired(alert):
+            alert.state = AlertState.EXPIRED
+            raise ValueError(f"提醒已过有效期：{alert_id}")
         alert.state = AlertState.USER_EXECUTED
         alert.user_executed_at = self._now()
         return alert
@@ -144,6 +150,8 @@ class AlertService:
         alert = self.get_alert(alert_id)
         if not alert:
             raise KeyError(f"未找到指定的提醒条目：{alert_id}")
+        if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED, AlertState.EXPIRED):
+            raise ValueError(f"当前提醒状态不可标记为未执行：{alert.state.value}")
         alert.state = AlertState.NOT_EXECUTED
         return alert
 

@@ -103,3 +103,10 @@ class TestDataQualityGuard:
         now = base + timedelta(seconds=35)
         assert guard.validate_and_classify(q, now=now) == DataQualityState.STALE
         assert guard.is_stale(q, current_time=now) is True
+
+
+def test_newly_received_old_source_quote_is_stale() -> None:
+    quote, now = _make_quote(quote_offset_sec=-3600)
+    guard = DataQualityGuard()
+    assert guard.validate_and_classify(quote, now) == DataQualityState.STALE
+    assert guard.is_stale(quote, now)

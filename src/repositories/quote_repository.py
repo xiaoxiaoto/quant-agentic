@@ -44,13 +44,21 @@ class QuoteRepository:
 
     def _is_eligible_pit(self, quote: QuoteRaw, as_of: datetime) -> bool:
         """检查行情记录是否满足 PIT 可用性条件。"""
-        cutoff = quote.available_at if quote.available_at is not None else quote.received_at
+        cutoff = max(quote.quote_at, quote.received_at, quote.available_at or quote.received_at)
         return cutoff <= as_of
+
+    @staticmethod
+    def compute_record_hash(quote: QuoteRaw) -> str:
+        """计算不含校验字段的完整记录哈希。"""
+        record = quote.model_dump(mode="json", exclude={"record_hash"})
+        payload = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def save_quote(self, quote: QuoteRaw) -> None:
         """将单条行情写入对应的日期分卷文件。"""
         date_str = quote.received_at.strftime("%Y-%m-%d")
         file_path = self._storage_dir / f"quotes_{date_str}.jsonl"
+        quote.record_hash = self.compute_record_hash(quote)
         record = quote.model_dump(mode="json")
         with open(file_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -73,10 +81,14 @@ class QuoteRepository:
                     quote = self._parse_line(line)
                     if quote is None:
                         continue
+                    if quote.quality_state != DataQualityState.NORMAL:
+                        continue
                     if quote.product_code != product_code:
                         continue
-                    if self._is_eligible_pit(quote, as_of):
-                        return quote
+                    if self._is_eligible_pit(quote, as_of) and (
+                        candidate is None or quote.quote_at > candidate.quote_at
+                    ):
+                        candidate = quote
             except OSError:
                 continue
         return candidate
@@ -128,6 +140,7 @@ class QuoteRepository:
             as_of=end_time,
             product_code=product_code,
         )
+        series.sort(key=lambda q: max(q.quote_at, q.received_at, q.available_at or q.received_at))
         yield from series
 
     def verify_file_integrity(self, file_path: Path) -> tuple[int, int]:
@@ -146,7 +159,12 @@ class QuoteRepository:
                 if quote is None:
                     corrupt_count += 1
                     continue
-                if quote.payload_hash:
+                if quote.record_hash:
+                    if quote.record_hash == self.compute_record_hash(quote):
+                        valid_count += 1
+                    else:
+                        corrupt_count += 1
+                elif quote.payload_hash:
                     # 重新计算哈希验证
                     expected = hashlib.sha256(
                         f"{quote.quote_id}:{quote.bid_price}:{quote.ask_price}".encode()

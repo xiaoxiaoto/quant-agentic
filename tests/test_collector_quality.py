@@ -67,3 +67,17 @@ def test_collector_quality_weekend_gap_detection() -> None:
     assert w_gap.gap_amount == 12.0  # 612.25 - 600.25 = 12.0
     assert w_gap.gap_pct > 0.019
     assert rep.max_weekend_gap_pct > 0.019
+
+
+def test_normal_weekend_closure_is_not_collection_outage() -> None:
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Asia/Shanghai")
+    times = [datetime(2026, 3, 7, 2, 29, tzinfo=tz), datetime(2026, 3, 9, 9, tzinfo=tz)]
+    quotes = [
+        QuoteRaw(
+            quote_id=str(i), source_id="s", bid_price=600, ask_price=601, quote_at=t, received_at=t, is_tradable=True
+        )
+        for i, t in enumerate(times)
+    ]
+    assert CollectorQualityAnalyzer().analyze(quotes).gap_count == 0

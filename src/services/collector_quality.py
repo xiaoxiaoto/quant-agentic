@@ -75,7 +75,7 @@ class CollectorQualityAnalyzer:
         for i in range(1, len(sorted_quotes)):
             prev_q = sorted_quotes[i - 1]
             curr_q = sorted_quotes[i]
-            diff_s = (curr_q.quote_at - prev_q.quote_at).total_seconds()
+            diff_s = self._calendar.trading_hours_between(prev_q.quote_at, curr_q.quote_at) * 3600.0
 
             # 仅在两端均处于开市交易时段内时判定为异常缺口
             if (

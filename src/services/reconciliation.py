@@ -14,7 +14,7 @@ from src.types.domain.account import (
     ReconciliationDiscrepancy,
     ReconciliationReport,
 )
-from src.types.enums.trading import RiskState
+from src.types.enums.trading import OrderState, RiskState
 
 
 class ReconciliationService:
@@ -127,6 +127,25 @@ class ReconciliationService:
         timestamp = as_of or self._now()
         discrepancies: list[ReconciliationDiscrepancy] = []
 
+        seen_bank_ids: set[str] = set()
+        seen_client_ids: set[str] = set()
+        for item in bank_statements:
+            duplicate_bank = item.bank_order_id in seen_bank_ids
+            duplicate_client = item.client_order_id is not None and item.client_order_id in seen_client_ids
+            if duplicate_bank or duplicate_client:
+                discrepancies.append(
+                    ReconciliationDiscrepancy(
+                        field_name=f"duplicate_bank_order_{item.bank_order_id}",
+                        local_value="UNIQUE",
+                        bank_value=item.bank_order_id,
+                        difference=1.0,
+                        tolerance=0.0,
+                        is_breached=True,
+                    )
+                )
+            seen_bank_ids.add(item.bank_order_id)
+            if item.client_order_id is not None:
+                seen_client_ids.add(item.client_order_id)
         bank_dict_by_id = {item.bank_order_id: item for item in bank_statements}
         bank_dict_by_client = {item.client_order_id: item for item in bank_statements if item.client_order_id}
 
@@ -145,7 +164,30 @@ class ReconciliationService:
                 unmatched_local.append(local_order.client_order_id)
                 continue
 
+            if matched_bank_item.bank_order_id in matched_bank_ids:
+                unmatched_local.append(local_order.client_order_id)
+                continue
             matched_bank_ids.add(matched_bank_item.bank_order_id)
+
+            fee_item = self._compare_numeric(
+                f"order_{local_order.client_order_id}_fee",
+                local_order.fee or 0.0,
+                matched_bank_item.fee,
+                self._cash_tolerance,
+            )
+            if fee_item.is_breached:
+                discrepancies.append(fee_item)
+            if local_order.state != OrderState.FILLED or matched_bank_item.status != "SUCCESS":
+                discrepancies.append(
+                    ReconciliationDiscrepancy(
+                        field_name=f"order_{local_order.client_order_id}_status",
+                        local_value=local_order.state.value,
+                        bank_value=matched_bank_item.status,
+                        difference=1.0,
+                        tolerance=0.0,
+                        is_breached=True,
+                    )
+                )
 
             # 核验成交方向
             if local_order.direction != matched_bank_item.direction:

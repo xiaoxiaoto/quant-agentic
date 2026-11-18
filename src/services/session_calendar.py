@@ -108,9 +108,28 @@ class SessionCalendar:
 
     def trading_hours_between(self, start: datetime, end: datetime) -> float:
         """估算两时间点之间的交易小时数。"""
-        total_hours = (end - start).total_seconds() / 3600
-        full_weeks = total_hours / 168.0  # 7 × 24
-        return full_weeks * self.trading_hours_per_week()
+        if end <= start:
+            return 0.0
+        local_start, local_end = self._to_local(start), self._to_local(end)
+        current_date = local_start.date()
+        total_seconds = 0.0
+        while current_date <= local_end.date():
+            weekday = current_date.weekday()
+            if current_date not in self._holidays and self._open_day <= weekday <= self._close_day:
+                daily_start = datetime.combine(
+                    current_date,
+                    self._open_time if weekday == self._open_day else time.min,
+                    tzinfo=self._tz,
+                )
+                daily_end = (
+                    datetime.combine(current_date, self._close_time, tzinfo=self._tz)
+                    if weekday == self._close_day
+                    else datetime.combine(current_date + timedelta(days=1), time.min, tzinfo=self._tz)
+                )
+                overlap = min(local_end, daily_end) - max(local_start, daily_start)
+                total_seconds += max(overlap.total_seconds(), 0.0)
+            current_date += timedelta(days=1)
+        return total_seconds / 3600.0
 
     def trading_hours_per_week(self) -> float:
         """每周标准交易小时数（周一 09:00 至周六 02:30 = 113.5 小时）。"""

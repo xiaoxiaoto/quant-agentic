@@ -100,3 +100,55 @@ def test_shadow_ledger_mark_to_market() -> None:
     total_eq = ledger.get_total_equity(current_bid_price=610.0)
     # 总资产 = 现金 44000 + 黄金市值 10 * 610 = 50100.0
     assert total_eq == 50100.0
+
+
+def test_ledger_replay_validation_and_buy_fee_cost() -> None:
+    ledger = ShadowLedger(initial_cash=1000.0, fee_rule=FeeRule(buy_fee_rate=0.01, sell_fee_rate=0))
+    ledger.record_buy("buy", 1, 100)
+    ledger.record_buy("buy", 1, 100)
+    assert ledger.take_snapshot().gold_total_g == 1
+    with pytest.raises(ValueError):
+        ledger.record_buy("negative", -1, 100)
+    with pytest.raises(ValueError):
+        ledger.record_buy("buy", 2, 100)
+    ledger.record_sell("sell", 1, 100)
+    assert ledger.take_snapshot().realized_pnl == -1
+
+
+@pytest.mark.parametrize("grams", [0.00001, 1.00001])
+def test_ledger_rejects_unsupported_gold_precision(grams: float) -> None:
+    ledger = ShadowLedger()
+    with pytest.raises(ValueError):
+        ledger.record_buy("tiny", grams, 1000)
+    assert ledger.take_snapshot().gold_total_g == 0
+
+
+def test_concurrent_ledger_replay_books_once() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from decimal import Decimal
+    from threading import Barrier, BrokenBarrierError
+    from unittest.mock import patch
+
+    ledger = ShadowLedger()
+    barrier = Barrier(2)
+    original = ledger._existing_trade
+
+    def synchronized_lookup(
+        client_order_id: str,
+        direction: TradeDirection,
+        grams: float,
+        price: float,
+        fee: Decimal,
+    ) -> object:
+        result = original(client_order_id, direction, grams, price, fee)
+        try:
+            barrier.wait(timeout=0.1)
+        except BrokenBarrierError:
+            pass
+        return result
+
+    with patch.object(ledger, "_existing_trade", side_effect=synchronized_lookup):
+        with ThreadPoolExecutor(2) as pool:
+            list(pool.map(lambda _: ledger.record_buy("same", 1, 100), range(2)))
+    assert ledger.take_snapshot().gold_total_g == 1
+    assert len(ledger.get_order_history()) == 1

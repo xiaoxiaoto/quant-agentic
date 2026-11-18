@@ -1,7 +1,7 @@
 """基础时序模型适配器服务。
 
-作为基础时序模型适配器，提供零样本预测与外部校准能力。
-输出作为特征输入上游模型，未获授权或离线时平滑降级。
+当前仅提供动量衰减代理，尚未接入 TimesFM 权重或推理接口。
+默认禁用；显式启用时也不代表真实模型或授权状态。
 """
 
 from datetime import UTC, datetime
@@ -16,7 +16,7 @@ class TimesFMAdapter:
     def __init__(
         self,
         is_enabled: bool = False,
-        model_version: str = "timesfm_3.0_zero_shot",
+        model_version: str = "momentum_proxy_v1",
         calibration_slope: float = 1.0,
         calibration_intercept: float = 0.0,
     ) -> None:
@@ -33,7 +33,7 @@ class TimesFMAdapter:
         prices: list[float],
         horizon_steps: int,
     ) -> float:
-        """基于历史序列与时序先验进行零样本或外推估计。"""
+        """基于历史动量进行衰减外推，不调用外部模型。"""
         if len(prices) < 2:
             return 0.0
         # 提取短期动量与均线平滑
@@ -47,7 +47,7 @@ class TimesFMAdapter:
         return round(calibrated, 6)
 
     def is_available(self) -> bool:
-        """检查模型是否已启用且授权合规核验通过。"""
+        """检查本地动量代理是否启用，不核验外部模型或授权。"""
         return self._enabled
 
     def predict_feature(

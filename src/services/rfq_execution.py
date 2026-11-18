@@ -7,11 +7,12 @@
 
 import uuid
 from datetime import UTC, datetime
+from math import isfinite
 
 from src.types.domain.execution import RFQFillResult, RFQRequest
 from src.types.domain.product import FeeRule
 from src.types.domain.quote import QuoteRaw
-from src.types.enums.trading import TradeDirection
+from src.types.enums.trading import DataQualityState, TradeDirection
 
 
 class RFQExecutionEngine:
@@ -32,6 +33,10 @@ class RFQExecutionEngine:
     def _now(self) -> datetime:
         return datetime.now(UTC)
 
+    @staticmethod
+    def _visible_at(quote: QuoteRaw) -> datetime:
+        return max(quote.quote_at, quote.received_at, quote.available_at or quote.received_at)
+
     def _compute_fill_probability(
         self,
         quote: QuoteRaw,
@@ -43,7 +48,7 @@ class RFQExecutionEngine:
         base_prob = 0.98 if request.is_programmatic else 0.92
 
         # 2. 报价时效惩罚（quote age 过大容易触发拒单或重新报价）
-        quote_age = max((request.eligible_at - quote.quote_at).total_seconds(), 0.0)
+        quote_age = max((self._visible_at(quote) - quote.quote_at).total_seconds(), 0.0)
         if quote_age > self._max_quote_age_s:
             base_prob -= 0.35
 
@@ -72,10 +77,27 @@ class RFQExecutionEngine:
 
         寻找 eligible_at 起的首条可成交报价并完成执行。
         """
+        if not isfinite(request.grams) or request.grams <= 0:
+            raise ValueError("请求克重必须为正且有限")
+        if request.eligible_at < request.decision_time:
+            raise ValueError("可成交时间不得早于决策时间")
         fill_id = f"fill_{uuid.uuid4().hex[:10]}"
 
         # 1. 寻找 eligible_at 之后的最早有效报价
-        eligible_quotes = [q for q in candidate_quotes if q.is_tradable and q.quote_at >= request.eligible_at]
+        eligible_quotes = sorted(
+            (
+                q
+                for q in candidate_quotes
+                if q.is_tradable
+                and q.quality_state == DataQualityState.NORMAL
+                and self._visible_at(q) >= request.eligible_at
+                and (self._visible_at(q) - q.quote_at).total_seconds() <= self._max_quote_age_s
+                and isfinite(q.bid_price)
+                and isfinite(q.ask_price)
+                and 0 < q.bid_price <= q.ask_price
+            ),
+            key=self._visible_at,
+        )
         if not eligible_quotes:
             return RFQFillResult(
                 fill_id=fill_id,
@@ -122,5 +144,5 @@ class RFQExecutionEngine:
             filled_grams=request.grams,
             fee_cny=fee_cny,
             slippage_cny=slippage,
-            filled_at=target_quote.quote_at,
+            filled_at=self._visible_at(target_quote),
         )

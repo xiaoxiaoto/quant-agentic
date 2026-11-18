@@ -19,13 +19,17 @@ class MultiWindowFusion:
     ) -> None:
         self._enabled: bool = is_enabled
         self._default_primary: HoldingPeriod = default_primary
-        self._allowed_horizons: list[HoldingPeriod] = allowed_horizons or [
-            HoldingPeriod.D1,
-            HoldingPeriod.D3,
-            HoldingPeriod.W1,
-            HoldingPeriod.W2,
-            HoldingPeriod.M1,
-        ]
+        self._allowed_horizons: list[HoldingPeriod] = (
+            allowed_horizons
+            if allowed_horizons is not None
+            else [
+                HoldingPeriod.D1,
+                HoldingPeriod.D3,
+                HoldingPeriod.W1,
+                HoldingPeriod.W2,
+                HoldingPeriod.M1,
+            ]
+        )
 
     def is_enabled(self) -> bool:
         """检查动态多窗口融合是否处于激活状态。"""
@@ -39,19 +43,15 @@ class MultiWindowFusion:
 
         未启用时直接返回默认固定主窗口（如 1w）。
         """
-        if not self._enabled:
-            pred = predictions.get(self._default_primary)
-            if pred is not None:
-                return self._default_primary, pred
-            # 若默认窗口未预测则取第一个有效预测
-            first_key = next(iter(predictions.keys()))
-            return first_key, predictions[first_key]
-
-        # 仅在允许的低频候选集中比对，严禁选择分钟或小时级子日内窗口开仓
         valid_candidates = {h: p for h, p in predictions.items() if h in self._allowed_horizons}
         if not valid_candidates:
-            first_key = next(iter(predictions.keys()))
-            return first_key, predictions[first_key]
+            raise ValueError("没有允许持有周期的有效预测")
+
+        if not self._enabled:
+            if self._default_primary in valid_candidates:
+                return self._default_primary, valid_candidates[self._default_primary]
+            first_key = next(iter(valid_candidates))
+            return first_key, valid_candidates[first_key]
 
         # 选择置信下界 (net_return_lcb) 最高且为正的窗口
         best_horizon = max(

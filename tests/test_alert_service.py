@@ -118,3 +118,54 @@ def test_alert_expiration() -> None:
     # 已超期的提醒无法再确认
     with pytest.raises(ValueError, match="当前提醒状态不可确认为意向"):
         service.confirm_alert(alert.alert_id)
+
+
+@pytest.mark.parametrize("operation", ["mark_executed", "decline_alert", "mark_not_executed"])
+def test_alert_terminal_state_cannot_be_overwritten(operation: str) -> None:
+    service = AlertService()
+    now = datetime.now(UTC)
+    decision = Decision(
+        decision_id="terminal",
+        decision_at=now,
+        action=DecisionAction.BUY,
+        delta_g=1.0,
+        target_inventory_g=1.0,
+        horizon_primary=HoldingPeriod.W1,
+    )
+    quote = QuoteRaw(
+        quote_id="q", source_id="src", bid_price=600.0, ask_price=600.5, quote_at=now, received_at=now, is_tradable=True
+    )
+    alert = service.create_alert(decision, quote, AccountSnapshot())
+    assert alert is not None
+    service.mark_executed(alert.alert_id)
+    with pytest.raises(ValueError):
+        getattr(service, operation)(alert.alert_id)
+    assert alert.state == AlertState.USER_EXECUTED
+
+
+def test_alert_uses_shared_fee_calculator_and_decision_expiry() -> None:
+    from src.services.cost_calculator import CostCalculator
+
+    now = datetime.now(UTC)
+    calc = CostCalculator(FeeRule(buy_fee_rate=0.002, sell_fee_rate=0.01))
+    service = AlertService(cost_calculator=calc)
+    decision = Decision(
+        decision_id="fees",
+        decision_at=now,
+        action=DecisionAction.BUY,
+        delta_g=1.0,
+        target_inventory_g=1.0,
+        horizon_primary=HoldingPeriod.W1,
+        expires_at=now + timedelta(minutes=1),
+    )
+    quote = QuoteRaw(
+        quote_id="q", source_id="src", bid_price=600.0, ask_price=600.5, quote_at=now, received_at=now, is_tradable=True
+    )
+    alert = service.create_alert(decision, quote, AccountSnapshot())
+    assert alert is not None
+    assert alert.break_even_price == round(calc.break_even_bid(600.5), 4)
+    assert alert.expires_at == decision.expires_at
+    alert.expires_at = now - timedelta(seconds=1)
+    with pytest.raises(ValueError):
+        service.mark_executed(alert.alert_id)
+    assert alert.state == AlertState.EXPIRED

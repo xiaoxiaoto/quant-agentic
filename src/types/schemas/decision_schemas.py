@@ -3,17 +3,27 @@
 定义决策触发评估与风控核验相关的接口请求与响应载荷模型。
 """
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field, PositiveFloat
 
 from src.types.domain.decision import Decision
 from src.types.domain.quote import QuoteRaw
 
 
+class DecisionQuote(QuoteRaw):
+    """参与计算的行情必须使用有限正价格和带时区时间。"""
+
+    bid_price: PositiveFloat = Field(allow_inf_nan=False)
+    ask_price: PositiveFloat = Field(allow_inf_nan=False)
+    quote_at: AwareDatetime
+    received_at: AwareDatetime
+    available_at: AwareDatetime | None = None
+
+
 class DecisionEvaluateRequest(BaseModel):
     """决策触发请求参数模型。"""
 
-    quote: QuoteRaw = Field(description="当前基准行情")
-    target_buy_grams: float = Field(default=1.0, description="建议单笔申报克重")
+    quote: DecisionQuote = Field(description="当前基准行情")
+    target_buy_grams: PositiveFloat = Field(default=1.0, allow_inf_nan=False, description="建议单笔申报克重")
 
 
 class DecisionEvaluateResponse(BaseModel):

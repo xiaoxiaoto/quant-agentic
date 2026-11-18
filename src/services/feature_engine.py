@@ -12,6 +12,7 @@ from src.services.session_calendar import SessionCalendar
 from src.services.timesfm_adapter import TimesFMAdapter
 from src.types.domain.feature import FeatureSet
 from src.types.domain.quote import QuoteRaw
+from src.types.enums.trading import DataQualityState
 
 
 class FeatureEngine:
@@ -54,16 +55,20 @@ class FeatureEngine:
         if len(quotes) < 3:
             return 0.0
         returns: list[float] = []
+        intervals: list[float] = []
         for i in range(1, len(quotes)):
             p0 = quotes[i - 1].bid_price
             p1 = quotes[i].bid_price
-            if p0 > 0:
+            interval = (quotes[i].quote_at - quotes[i - 1].quote_at).total_seconds()
+            if p0 > 0 and interval > 0:
                 returns.append((p1 - p0) / p0)
+                intervals.append(interval)
         if len(returns) < 2:
             return 0.0
         std = statistics.stdev(returns)
-        # 换算为年化波动率（假设每年约 250 个交易日）
-        annualized_vol = std * math.sqrt(250.0 * 24.0)
+        # 不等间隔以有效平均采样间隔近似年化，闭市时间计入实际经过时间。
+        annual_periods = 365.0 * 86400.0 / statistics.mean(intervals)
+        annualized_vol = std * math.sqrt(annual_periods)
         return round(annualized_vol, 6)
 
     def extract_features(
@@ -73,6 +78,15 @@ class FeatureEngine:
         as_of: datetime | None = None,
     ) -> FeatureSet:
         """从历史报价序列与当前环境状态中提取全量特征向量。"""
+        history_quotes = sorted(
+            (
+                q
+                for q in history_quotes
+                if q.quality_state == DataQualityState.NORMAL
+                and (as_of is None or (q.quote_at <= as_of and (q.available_at or q.received_at) <= as_of))
+            ),
+            key=lambda q: q.quote_at,
+        )
         if not history_quotes:
             now_dt = as_of or self._now()
             return FeatureSet(
@@ -97,7 +111,7 @@ class FeatureEngine:
 
         # 波动率
         r_vol = self._calc_realized_volatility(history_quotes)
-        # 近似 ATR
+        # 缺少 OHLC，保留近二十次价格标准差作为 ATR 代理。
         prices = [q.bid_price for q in history_quotes[-20:]]
         atr = round(statistics.stdev(prices), 4) if len(prices) >= 2 else 0.0
 

@@ -14,6 +14,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from src.repositories.quote_repository import QuoteRepository
 from src.services.data_quality import DataQualityGuard
 from src.types.domain.quote import QuoteDerived, QuoteRaw
 from src.types.enums.trading import DataQualityState
@@ -47,6 +48,7 @@ class QuoteRecorder:
 
     def _append_to_log(self, quote: QuoteRaw) -> None:
         file_path = self._get_daily_file_path(quote.received_at)
+        quote.record_hash = QuoteRepository.compute_record_hash(quote)
         record = quote.model_dump(mode="json")
         with open(file_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")

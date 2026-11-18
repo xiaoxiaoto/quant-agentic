@@ -1,13 +1,14 @@
 """影子运行与消融验证仿真服务。
 
 驱动行情流式回放，串联特征工程、模型预测、元决策、独立风控与 RFQ 成交模型。
-核算净值曲线、最大回撤、交易成本与降缩夏普比率（Deflated Sharpe Ratio）。
+核算净值曲线、最大回撤、交易成本与夏普比率。
 """
 
 import math
 import uuid
 from datetime import UTC, datetime
 
+from src.services.cost_calculator import CostCalculator
 from src.services.decision_engine import DecisionEngine
 from src.services.feature_engine import FeatureEngine
 from src.services.predictor import ModelPredictor
@@ -35,31 +36,19 @@ class ShadowRunner:
         rfq_engine: RFQExecutionEngine | None = None,
         fee_rule: FeeRule | None = None,
     ) -> None:
+        if not math.isfinite(initial_cash) or initial_cash <= 0:
+            raise ValueError("初始资金必须为正且有限")
         self._initial_cash = initial_cash
         self._fee_rule = fee_rule or FeeRule()
+        self._calculator = CostCalculator(self._fee_rule)
         self._features = feature_engine or FeatureEngine()
-        self._predictor = predictor or ModelPredictor()
-        self._decision = decision_engine or DecisionEngine()
+        self._predictor = predictor or ModelPredictor(fee_rule=self._fee_rule)
+        self._decision = decision_engine or DecisionEngine(fee_rule=self._fee_rule)
         self._risk = risk_engine or RiskEngine(fee_rule=self._fee_rule)
         self._rfq = rfq_engine or RFQExecutionEngine(fee_rule=self._fee_rule)
 
     def _now(self) -> datetime:
         return datetime.now(UTC)
-
-    def _calc_deflated_sharpe(
-        self,
-        sharpe: float | None,
-        num_trials: int = 10,
-        sample_length: int = 100,
-    ) -> float | None:
-        """根据多重检验试验次数对夏普比率进行降缩修正（Deflated Sharpe）。"""
-        if sharpe is None or sample_length < 5:
-            return None
-        # 极大值期望近似：E[max] ≈ sqrt(2 * log(N))
-        e_max_sharpe = math.sqrt(2.0 * math.log(max(num_trials, 1)))
-        # 降缩调整后的估计量
-        deflated = sharpe - (e_max_sharpe / math.sqrt(sample_length))
-        return round(max(deflated, 0.0), 4)
 
     def run_shadow_simulation(
         self,
@@ -81,22 +70,32 @@ class ShadowRunner:
                 max_drawdown_pct=0.0,
             )
 
-        sorted_quotes = sorted(quotes, key=lambda q: q.quote_at)
-        start_time = sorted_quotes[0].quote_at
-        end_time = sorted_quotes[-1].quote_at
+        sorted_quotes = sorted(quotes, key=lambda q: max(q.quote_at, q.received_at, q.available_at or q.received_at))
+        start_time = max(
+            sorted_quotes[0].quote_at,
+            sorted_quotes[0].received_at,
+            sorted_quotes[0].available_at or sorted_quotes[0].received_at,
+        )
+        end_time = max(
+            sorted_quotes[-1].quote_at,
+            sorted_quotes[-1].received_at,
+            sorted_quotes[-1].available_at or sorted_quotes[-1].received_at,
+        )
 
         ledger = ShadowLedger(initial_cash=self._initial_cash, fee_rule=self._fee_rule)
         equity_curve: list[float] = []
         trades_count = 0
         winning_trades = 0
+        closed_trades = 0
         total_fees = 0.0
 
         for i in range(len(sorted_quotes)):
             curr_q = sorted_quotes[i]
+            current_time = max(curr_q.quote_at, curr_q.received_at, curr_q.available_at or curr_q.received_at)
             history_window = sorted_quotes[max(0, i - 30) : i + 1]
 
             # 1. 提取特征
-            feats = self._features.extract_features(history_window)
+            feats = self._features.extract_features(history_window, as_of=current_time)
 
             # 2. 预测主要持有周期
             pred_w1 = self._predictor.predict(feats, horizon=HoldingPeriod.W1)
@@ -107,12 +106,13 @@ class ShadowRunner:
             }
 
             # 3. 元决策引擎评估
-            snap = ledger.take_snapshot(curr_q.quote_at)
+            snap = ledger.take_snapshot(current_time)
             dec = self._decision.evaluate_decision(
                 quote=curr_q,
                 predictions=preds,
                 account=snap,
                 target_buy_grams=trade_grams_per_order,
+                as_of=current_time,
             )
 
             # 4. 独立风控一票否决
@@ -130,11 +130,11 @@ class ShadowRunner:
                     request_id=f"req_{i}",
                     direction=direction,
                     grams=abs(approved_dec.delta_g),
-                    decision_time=curr_q.quote_at,
-                    eligible_at=curr_q.quote_at,
+                    decision_time=current_time,
+                    eligible_at=current_time,
                     is_programmatic=True,
                 )
-                fill = self._rfq.simulate_execution(req, candidate_quotes=sorted_quotes[i:])
+                fill = self._rfq.simulate_execution(req, candidate_quotes=[curr_q])
                 if fill.is_filled and fill.filled_price is not None:
                     trades_count += 1
                     total_fees += fill.fee_cny
@@ -144,23 +144,31 @@ class ShadowRunner:
                             grams=fill.filled_grams,
                             price=fill.filled_price,
                             fee=fill.fee_cny,
-                            timestamp=curr_q.quote_at,
+                            timestamp=fill.filled_at or current_time,
                         )
                     else:
-                        event = ledger.record_sell(
+                        previous_pnl = ledger.take_snapshot().realized_pnl
+                        ledger.record_sell(
                             client_order_id=f"cid_{i}",
                             grams=fill.filled_grams,
                             price=fill.filled_price,
                             fee=fill.fee_cny,
-                            timestamp=curr_q.quote_at,
+                            timestamp=fill.filled_at or current_time,
                         )
                         # 检查已实现盈亏是否为正
-                        current_snap = ledger.take_snapshot(curr_q.quote_at)
-                        if current_snap.realized_pnl > 0:
+                        current_snap = ledger.take_snapshot(current_time)
+                        closed_trades += 1
+                        if current_snap.realized_pnl > previous_pnl:
                             winning_trades += 1
 
             # 记录净值曲线
-            eq = ledger.get_total_equity(curr_q.bid_price)
+            ledger.mark_to_market(curr_q.bid_price)
+            snapshot = ledger.take_snapshot(current_time)
+            eq = (
+                snapshot.cash_available
+                + snapshot.cash_frozen
+                + self._calculator.exit_cash_in(snapshot.gold_total_g, curr_q.bid_price)
+            )
             equity_curve.append(eq)
 
         # 结算绩效指标
@@ -168,7 +176,7 @@ class ShadowRunner:
         total_return = (final_equity - self._initial_cash) / self._initial_cash
 
         # 计算最大回撤
-        peak = equity_curve[0] if equity_curve else self._initial_cash
+        peak = self._initial_cash
         max_dd = 0.0
         for eq in equity_curve:
             if eq > peak:
@@ -194,14 +202,17 @@ class ShadowRunner:
                 var = sum((r - m_ret) ** 2 for r in returns) / len(returns)
                 std_ret = math.sqrt(var)
                 if std_ret > 1e-8:
-                    sharpe = round((m_ret / std_ret) * math.sqrt(250.0), 4)
+                    # 按观测区间平均采样频率年化；不等间隔数据仍是近似。
+                    elapsed = (end_time - start_time).total_seconds()
+                    if elapsed > 0:
+                        annual_periods = len(returns) * 365.0 * 86400.0 / elapsed
+                        sharpe = round((m_ret / std_ret) * math.sqrt(annual_periods), 4)
 
-        deflated_sr = self._calc_deflated_sharpe(sharpe, sample_length=len(equity_curve))
-        win_rate = winning_trades / trades_count if trades_count > 0 else 0.0
+        win_rate = winning_trades / closed_trades if closed_trades > 0 else 0.0
 
         summary = (
             f"影子运行完成：总收益率 {total_return * 100:.2f}%，最大回撤 {max_dd * 100:.2f}%，"
-            f"交易笔数 {trades_count}，修正后夏普比率 {deflated_sr}"
+            f"交易笔数 {trades_count}，夏普比率 {sharpe}；未计算多重检验修正指标"
         )
 
         return ShadowRunReport(
@@ -214,7 +225,6 @@ class ShadowRunner:
             annualized_return_pct=round(annualized, 6),
             max_drawdown_pct=round(max_dd, 6),
             sharpe_ratio=sharpe,
-            deflated_sharpe=deflated_sr,
             total_trades=trades_count,
             winning_trades=winning_trades,
             win_rate=round(win_rate, 4),

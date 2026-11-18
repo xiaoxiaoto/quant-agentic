@@ -51,6 +51,8 @@ def decline_alert(alert_id: str) -> AlertPayload:
         return _alert_service.decline_alert(alert_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="未找到指定的提醒条目")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/{alert_id}/execute", response_model=AlertPayload)

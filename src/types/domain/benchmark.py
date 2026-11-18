@@ -100,7 +100,7 @@ class ShadowRunReport(BaseModel):
     )
     deflated_sharpe: float | None = Field(
         default=None,
-        description="多重检验修正后的降缩夏普比率（Deflated Sharpe Ratio）",
+        description="多重检验修正指标；当前未实现，返回空值",
     )
     total_trades: int = Field(
         default=0,
@@ -112,11 +112,11 @@ class ShadowRunReport(BaseModel):
     )
     win_rate: float = Field(
         default=0.0,
-        description="交易胜率比例（盈利笔数 / 总交易笔数）",
+        description="平仓交易胜率比例（盈利卖出笔数 / 已完成卖出笔数）",
     )
     total_fees_cny: float = Field(
         default=0.0,
-        description="累计发生的手续费与摩擦成本总额（元）",
+        description="累计发生的实际手续费总额（元），滑点已计入成交价格",
     )
     summary: str = Field(
         default="",

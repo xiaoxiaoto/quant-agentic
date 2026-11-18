@@ -178,3 +178,10 @@ class TestTimezoneConversion:
         utc = ZoneInfo("UTC")
         dt = datetime(2024, 1, 1, 0, 0, tzinfo=utc)
         assert cal.is_trading_time(dt) is False
+
+
+def test_trading_hours_excludes_weekends_and_holidays() -> None:
+    cal = SessionCalendar(holidays=[date(2026, 3, 10)])
+    assert cal.trading_hours_between(_dt(2026, 3, 7, 2, 30), _dt(2026, 3, 9, 9)) == 0
+    assert cal.trading_hours_between(_dt(2026, 3, 9, 9), _dt(2026, 3, 11, 9)) == 24
+    assert cal.trading_hours_between(_dt(2026, 3, 9, 9), _dt(2026, 3, 9, 10)) == 1

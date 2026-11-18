@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from src.types.domain.benchmark import BaselineComparisonReport, BaselineMetrics
 from src.types.domain.product import FeeRule
 from src.types.domain.quote import QuoteRaw
+from src.types.enums.trading import DataQualityState
 
 
 class BaselineEngine:
@@ -29,6 +30,20 @@ class BaselineEngine:
     def _now(self) -> datetime:
         return datetime.now(UTC)
 
+    def _valid_quotes(self, quotes: list[QuoteRaw]) -> list[QuoteRaw]:
+        return sorted(
+            (
+                q
+                for q in quotes
+                if q.is_tradable
+                and q.quality_state == DataQualityState.NORMAL
+                and math.isfinite(q.bid_price)
+                and math.isfinite(q.ask_price)
+                and 0 < q.bid_price <= q.ask_price
+            ),
+            key=lambda q: q.available_at or q.received_at,
+        )
+
     def _compute_max_drawdown(self, equity_curve: list[float]) -> float:
         if not equity_curve:
             return 0.0
@@ -46,12 +61,20 @@ class BaselineEngine:
     def _compute_sharpe(
         self,
         equity_curve: list[float],
-        annual_periods: float = 250.0,
+        quotes: list[QuoteRaw],
     ) -> float | None:
         if len(equity_curve) < 2:
             return None
         returns: list[float] = []
+        intervals: list[float] = []
         for i in range(1, len(equity_curve)):
+            interval = (
+                (quotes[i].available_at or quotes[i].received_at)
+                - (quotes[i - 1].available_at or quotes[i - 1].received_at)
+            ).total_seconds()
+            if interval <= 0:
+                continue
+            intervals.append(interval)
             prev = equity_curve[i - 1]
             if prev > 0:
                 returns.append((equity_curve[i] - prev) / prev)
@@ -61,6 +84,8 @@ class BaselineEngine:
         if not returns:
             return None
 
+        # 不等间隔以有效平均采样间隔近似年化，闭市时间计入实际经过时间。
+        annual_periods = 365.0 * 86400.0 / (sum(intervals) / len(intervals))
         mean_ret = sum(returns) / len(returns)
         var = sum((r - mean_ret) ** 2 for r in returns) / len(returns)
         std_ret = math.sqrt(var)
@@ -92,7 +117,7 @@ class BaselineEngine:
         quotes: list[QuoteRaw],
     ) -> BaselineMetrics:
         """运行买入持有（一次性全仓）基准。"""
-        tradable_quotes = [q for q in quotes if q.is_tradable]
+        tradable_quotes = self._valid_quotes(quotes)
         if not tradable_quotes:
             return self.run_cash_only(quotes)
 
@@ -107,7 +132,7 @@ class BaselineEngine:
         grams = self._initial_cash / cost_per_gram
         initial_fee = grams * buy_price * buy_fee_rate
 
-        equity_curve: list[float] = []
+        equity_curve: list[float] = [self._initial_cash]
         for q in tradable_quotes:
             # 净值 = 变现后净残值
             est_value = grams * q.bid_price * (1.0 - sell_fee_rate)
@@ -123,12 +148,16 @@ class BaselineEngine:
 
         # 计算年化
         duration_days = max(
-            (last_quote.quote_at - first_quote.quote_at).total_seconds() / 86400.0,
+            (
+                (last_quote.available_at or last_quote.received_at)
+                - (first_quote.available_at or first_quote.received_at)
+            ).total_seconds()
+            / 86400.0,
             1.0,
         )
         annualized = (1.0 + total_return) ** (365.0 / duration_days) - 1.0
 
-        sharpe = self._compute_sharpe(equity_curve)
+        sharpe = self._compute_sharpe(equity_curve[1:], tradable_quotes)
 
         return BaselineMetrics(
             strategy_name="BUY_AND_HOLD",
@@ -147,12 +176,14 @@ class BaselineEngine:
         step_intervals: int = 5,
     ) -> BaselineMetrics:
         """运行定期定额定投（DCA）基准。"""
-        tradable_quotes = [q for q in quotes if q.is_tradable]
+        if step_intervals <= 0:
+            raise ValueError("定投采样间隔必须为正整数")
+        tradable_quotes = self._valid_quotes(quotes)
         if not tradable_quotes:
             return self.run_cash_only(quotes)
 
         # 规划定投批次
-        total_steps = max(len(tradable_quotes) // max(step_intervals, 1), 1)
+        total_steps = max(len(tradable_quotes) // step_intervals, 1)
         cash_per_step = self._initial_cash / total_steps
         buy_fee_rate = self._fee_rule.buy_fee_rate
         sell_fee_rate = self._fee_rule.sell_fee_rate
@@ -161,7 +192,7 @@ class BaselineEngine:
         accumulated_grams = 0.0
         total_fees = 0.0
         trades_count = 0
-        equity_curve: list[float] = []
+        equity_curve: list[float] = [self._initial_cash]
 
         for idx, q in enumerate(tradable_quotes):
             # 每隔 step_intervals 步买入一次
@@ -192,11 +223,15 @@ class BaselineEngine:
         max_dd = self._compute_max_drawdown(equity_curve)
 
         duration_days = max(
-            (last_quote.quote_at - tradable_quotes[0].quote_at).total_seconds() / 86400.0,
+            (
+                (last_quote.available_at or last_quote.received_at)
+                - (tradable_quotes[0].available_at or tradable_quotes[0].received_at)
+            ).total_seconds()
+            / 86400.0,
             1.0,
         )
         annualized = (1.0 + total_return) ** (365.0 / duration_days) - 1.0
-        sharpe = self._compute_sharpe(equity_curve)
+        sharpe = self._compute_sharpe(equity_curve[1:], tradable_quotes)
 
         return BaselineMetrics(
             strategy_name="DCA",
