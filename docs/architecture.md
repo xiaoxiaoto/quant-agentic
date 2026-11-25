@@ -5,7 +5,7 @@
 Arrows point in the allowed import direction. A layer may import any layer to its left; reverse imports fail the build.
 
 ```
-(contracts | configs) → repositories → agents → services → runtime → routers
+(contracts | configs) → (repositories | clients) → agents → services → runtime → routers
 ```
 
 | Layer | May import | Purpose |
@@ -13,8 +13,9 @@ Arrows point in the allowed import direction. A layer may import any layer to it
 | `src/contracts` | (nothing in `src/`) | Domain types, Pydantic v2 schemas, enums, domain exceptions |
 | `src/configs` | (nothing in `src/`) | Settings (Pydantic Settings), env, constants, logging config |
 | `src/repositories` | `contracts`, `configs` | SQLAlchemy ORM models + DB access |
-| `src/agents` | `contracts`, `configs`, `repositories` | Decision / orchestration (LLM tools, planners) |
-| `src/services` | `contracts`, `configs`, `repositories`, `agents` | Business logic |
+| `src/clients` | `contracts`, `configs` | External HTTP clients; no imports from repositories |
+| `src/agents` | `contracts`, `configs`, `repositories`, `clients` | Decision / orchestration (LLM tools, planners) |
+| `src/services` | `contracts`, `configs`, `repositories`, `clients`, `agents` | Business logic |
 | `src/runtime` | all above | DI providers, middleware, lifespan, scheduler, request context |
 | `src/routers` | all above | HTTP / WebSocket entry points |
 | `main.py` | everything | Composition root; lives outside `src/` |

@@ -4,7 +4,7 @@ Project-wide instructions for coding agents. The root file follows the `AGENTS.m
 
 ## Project
 
-quant-agentic - TODO(init-project): one sentence describing what this project does.
+quant-agentic — 积存黄金研究与影子交易后端：行情校验、PIT 回放、多模型预测与元决策、风控、模拟记账与对账。
 
 ## Start here
 

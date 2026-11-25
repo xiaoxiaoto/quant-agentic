@@ -10,6 +10,30 @@ from src.contracts.schemas.decision import (
 from src.contracts.schemas.decision import (
     DecisionEvaluateResponse as DecisionEvaluateResponse,
 )
+from src.contracts.schemas.model import (
+    MacroEventCreateRequest as MacroEventCreateRequest,
+)
+from src.contracts.schemas.model import (
+    NewsExtractRequest as NewsExtractRequest,
+)
+from src.contracts.schemas.model import (
+    NewsExtractResponse as NewsExtractResponse,
+)
+from src.contracts.schemas.model import (
+    NewsOverviewResponse as NewsOverviewResponse,
+)
+from src.contracts.schemas.model import (
+    NewsSyncReport as NewsSyncReport,
+)
+from src.contracts.schemas.model import (
+    TrainingPipelineReport as TrainingPipelineReport,
+)
+from src.contracts.schemas.model import (
+    TrainingPipelineRequest as TrainingPipelineRequest,
+)
+from src.contracts.schemas.model import (
+    WalkForwardFoldReport as WalkForwardFoldReport,
+)
 from src.contracts.schemas.quote import (
     QuoteIngestRequest as QuoteIngestRequest,
 )
@@ -21,4 +45,46 @@ from src.contracts.schemas.reconciliation import (
 )
 from src.contracts.schemas.reconciliation import (
     SnapshotReconcileResponse as SnapshotReconcileResponse,
+)
+from src.contracts.schemas.trading import (
+    AlertExecuteRequest as AlertExecuteRequest,
+)
+from src.contracts.schemas.trading import (
+    BacktestRunRequest as BacktestRunRequest,
+)
+from src.contracts.schemas.trading import (
+    BatchOrderExecuteRequest as BatchOrderExecuteRequest,
+)
+from src.contracts.schemas.trading import (
+    BatchOrderExecuteResponse as BatchOrderExecuteResponse,
+)
+from src.contracts.schemas.trading import (
+    BatchOrderRegisterRequest as BatchOrderRegisterRequest,
+)
+from src.contracts.schemas.trading import (
+    FeasibilityReportResponse as FeasibilityReportResponse,
+)
+from src.contracts.schemas.trading import (
+    FeasibilityRequest as FeasibilityRequest,
+)
+from src.contracts.schemas.trading import (
+    FeasibilityRowResponse as FeasibilityRowResponse,
+)
+from src.contracts.schemas.trading import (
+    KillSwitchRequest as KillSwitchRequest,
+)
+from src.contracts.schemas.trading import (
+    KillSwitchStatusResponse as KillSwitchStatusResponse,
+)
+from src.contracts.schemas.trading import (
+    LiveStepRequest as LiveStepRequest,
+)
+from src.contracts.schemas.trading import (
+    LocalPaperOrderResponse as LocalPaperOrderResponse,
+)
+from src.contracts.schemas.trading import (
+    PaperOrderRequest as PaperOrderRequest,
+)
+from src.contracts.schemas.trading import (
+    PaperStepRequest as PaperStepRequest,
 )

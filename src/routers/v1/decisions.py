@@ -32,7 +32,7 @@ def evaluate_decision(
     ):
         raise HTTPException(status_code=422, detail="决策报价的时间与可用时间不能晚于当前时点")
     history = runtime.quotes.query_pit_series(
-        start_time=now - timedelta(hours=max(720, runtime.settings.timesfm_context_length + 1)),
+        start_time=payload.quote.quote_at - timedelta(hours=max(720, runtime.settings.timesfm_context_length + 1)),
         end_time=payload.quote.quote_at,
         as_of=now,
         product_code=payload.quote.product_code,

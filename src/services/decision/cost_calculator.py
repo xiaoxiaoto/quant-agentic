@@ -91,10 +91,10 @@ class CostCalculator:
     ) -> float:
         """止损触发时每克黄金的净退出损失金额。
 
-        L_g ≈ P_ask × (d + s + f_sell)
-        其中 d 为止损距离比例，s 为点差比例，f_sell 为卖出费率。
+        L_g ≈ P_ask × (d + s + f_buy + f_sell)
+        其中 d 为止损距离比例，s 为点差比例，f_buy / f_sell 为买卖费率。
         """
-        return ask_price * (stop_distance_pct + spread_pct + self._fee.sell_fee_rate)
+        return ask_price * (stop_distance_pct + spread_pct + self._fee.buy_fee_rate + self._fee.sell_fee_rate)
 
     def total_round_trip_cost_pct(self, spread_pct: float = 0.0) -> float:
         """往返总成本比例（手续费 + 点差）。

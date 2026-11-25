@@ -4,6 +4,7 @@
 任何对账不一致均将触发对账差异报告，并驱动风控进入 HALT_RECONCILE 状态。
 """
 
+import math
 import uuid
 from datetime import UTC, datetime
 
@@ -43,6 +44,15 @@ class ReconciliationService:
         bank_val: float,
         tolerance: float,
     ) -> ReconciliationDiscrepancy:
+        if not (math.isfinite(local_val) and math.isfinite(bank_val)):
+            return ReconciliationDiscrepancy(
+                field_name=field_name,
+                local_value=str(local_val),
+                bank_value=str(bank_val),
+                difference=0.0,
+                tolerance=tolerance,
+                is_breached=True,
+            )
         diff = abs(local_val - bank_val)
         breached = diff > tolerance
         return ReconciliationDiscrepancy(
@@ -91,15 +101,27 @@ class ReconciliationService:
             discrepancies.append(gold_item)
 
         # 校验单位成本基准（若银行提供）
-        if bank_cost_basis is not None and local_snapshot.cost_basis_per_g is not None:
-            cost_item = self._compare_numeric(
-                field_name="cost_basis_per_g",
-                local_val=local_snapshot.cost_basis_per_g,
-                bank_val=bank_cost_basis,
-                tolerance=self._cost_tolerance,
-            )
-            if cost_item.is_breached:
-                discrepancies.append(cost_item)
+        if bank_cost_basis is not None:
+            if local_snapshot.cost_basis_per_g is None:
+                discrepancies.append(
+                    ReconciliationDiscrepancy(
+                        field_name="cost_basis_per_g",
+                        local_value="NONE",
+                        bank_value=bank_cost_basis if math.isfinite(bank_cost_basis) else str(bank_cost_basis),
+                        difference=0.0,
+                        tolerance=self._cost_tolerance,
+                        is_breached=True,
+                    )
+                )
+            else:
+                cost_item = self._compare_numeric(
+                    field_name="cost_basis_per_g",
+                    local_val=local_snapshot.cost_basis_per_g,
+                    bank_val=bank_cost_basis,
+                    tolerance=self._cost_tolerance,
+                )
+                if cost_item.is_breached:
+                    discrepancies.append(cost_item)
 
         matched = len(discrepancies) == 0
         recommended_risk = RiskState.NORMAL if matched else RiskState.HALT_RECONCILE
@@ -169,6 +191,21 @@ class ReconciliationService:
                 continue
             matched_bank_ids.add(matched_bank_item.bank_order_id)
 
+            if (
+                matched_bank_item.client_order_id is not None
+                and matched_bank_item.client_order_id != local_order.client_order_id
+            ):
+                discrepancies.append(
+                    ReconciliationDiscrepancy(
+                        field_name=f"order_{local_order.client_order_id}_client_order_id",
+                        local_value=local_order.client_order_id,
+                        bank_value=matched_bank_item.client_order_id,
+                        difference=1.0,
+                        tolerance=0.0,
+                        is_breached=True,
+                    )
+                )
+
             fee_item = self._compare_numeric(
                 f"order_{local_order.client_order_id}_fee",
                 local_order.fee or 0.0,
@@ -203,34 +240,24 @@ class ReconciliationService:
                 )
 
             # 核验成交克重
-            loc_grams = local_order.filled_grams or 0.0
-            gram_diff = abs(loc_grams - matched_bank_item.grams)
-            if gram_diff > self._gold_tolerance:
-                discrepancies.append(
-                    ReconciliationDiscrepancy(
-                        field_name=f"order_{local_order.client_order_id}_grams",
-                        local_value=loc_grams,
-                        bank_value=matched_bank_item.grams,
-                        difference=gram_diff,
-                        tolerance=self._gold_tolerance,
-                        is_breached=True,
-                    )
-                )
+            gram_item = self._compare_numeric(
+                f"order_{local_order.client_order_id}_grams",
+                local_order.filled_grams or 0.0,
+                matched_bank_item.grams,
+                self._gold_tolerance,
+            )
+            if gram_item.is_breached:
+                discrepancies.append(gram_item)
 
             # 核验成交价格
-            loc_price = local_order.execution_price or 0.0
-            price_diff = abs(loc_price - matched_bank_item.price)
-            if price_diff > self._cost_tolerance:
-                discrepancies.append(
-                    ReconciliationDiscrepancy(
-                        field_name=f"order_{local_order.client_order_id}_price",
-                        local_value=loc_price,
-                        bank_value=matched_bank_item.price,
-                        difference=price_diff,
-                        tolerance=self._cost_tolerance,
-                        is_breached=True,
-                    )
-                )
+            price_item = self._compare_numeric(
+                f"order_{local_order.client_order_id}_price",
+                local_order.execution_price or 0.0,
+                matched_bank_item.price,
+                self._cost_tolerance,
+            )
+            if price_item.is_breached:
+                discrepancies.append(price_item)
 
         unmatched_bank = [b_id for b_id in bank_dict_by_id if b_id not in matched_bank_ids]
 

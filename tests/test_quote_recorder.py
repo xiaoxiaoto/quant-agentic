@@ -39,14 +39,15 @@ class TestQuoteRecorder:
         assert derived.mid_price == pytest.approx(650.3)
         assert derived.spread_pct == pytest.approx(0.6 / 650.3)
 
-        # 检查不可变日志落地
-        log_file = tmp_path / "quotes_2026-11-17.jsonl"
-        assert log_file.exists()
-        lines = log_file.read_text(encoding="utf-8").strip().split("\n")
-        assert len(lines) == 1
-        saved = json.loads(lines[0])
-        assert saved["quote_id"] == "quote_001"
-        assert saved["payload_hash"] is not None
+        # 检查统一落入 SQLite 且不额外生成本地 JSONL 文件
+        from src.repositories.quote import QuoteRepository
+
+        assert not (tmp_path / "quotes_2026-11-17.jsonl").exists()
+        assert (tmp_path / "quant-agentic.sqlite3").exists()
+        saved = QuoteRepository(tmp_path).get_latest_as_of(as_of=dt)
+        assert saved is not None
+        assert saved.quote_id == "quote_001"
+        assert saved.payload_hash is not None
 
     def test_record_anomaly_does_not_update_latest(self, tmp_path: Path) -> None:
         """异常报价落入审计日志，但严禁更新最新可成交状态。"""

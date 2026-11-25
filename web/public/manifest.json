@@ -1,0 +1,9 @@
+{
+  "name": "GoldQuant 黄金工作台",
+  "short_name": "GoldQuant",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#0b1018",
+  "theme_color": "#0b1018",
+  "description": "个人自用积存黄金研究、风控监控、实盘辅助提醒与对账工作台"
+}

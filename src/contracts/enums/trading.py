@@ -135,3 +135,18 @@ class ValidationLevel(DescribedStrEnum):
     V1_BANK_REPLAY = ("V1", "银行报价历史回放")
     V2_SHADOW = ("V2", "实时影子模拟运行")
     V3_LIVE_RECON = ("V3", "真实交易小额对账")
+
+
+class RunMode(DescribedStrEnum):
+    """主入口运行模式。"""
+
+    BACKTEST = ("backtest", "历史回测")
+    PAPER = ("paper", "模拟交易")
+    LIVE = ("live", "实盘辅助")
+
+
+class PaperEngine(DescribedStrEnum):
+    """模拟交易执行引擎类型。"""
+
+    LOCAL = ("local", "本地影子模拟盘")
+    JD = ("jd", "京东黄金远程模拟盘")

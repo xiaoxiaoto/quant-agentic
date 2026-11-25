@@ -152,3 +152,44 @@ def test_concurrent_ledger_replay_books_once() -> None:
             list(pool.map(lambda _: ledger.record_buy("same", 1, 100), range(2)))
     assert ledger.take_snapshot().gold_total_g == 1
     assert len(ledger.get_order_history()) == 1
+
+
+def test_reset_and_seed_holdings(tmp_path: object) -> None:
+    from pathlib import Path
+
+    from src.repositories.runtime_state import RuntimeStateRepository
+
+    db_path = Path(str(tmp_path)) / "quant-agentic.sqlite3"
+    store = RuntimeStateRepository(db_path)
+    ledger = ShadowLedger(initial_cash=50000.0, state_store=store)
+
+    # 先产生一笔旧买入流水
+    ledger.record_buy("old_buy_1", 2.0, 500.0)
+    assert ledger.take_snapshot().gold_total_g == 2.0
+
+    # 按京东持仓重置并初始化：CMBC 10g @ 600, ICBC 5g @ 620
+    # 总成本 = 6000 + 3100 = 9100
+    # 可用现金 = 100000 - 9100 = 90900
+    snap = ledger.reset_and_seed_holdings(
+        initial_cash=100000.0,
+        holdings=[("CMBC", 10.0, 600.0), ("ICBC", 5.0, 620.0)],
+    )
+    assert snap.gold_total_g == 15.0
+    assert snap.gold_available_g == 15.0
+    assert snap.cash_available == 90900.0
+    assert snap.cost_basis_per_g is not None
+    assert round(snap.cost_basis_per_g, 2) == round(9100.0 / 15.0, 2)
+    assert len(ledger.get_order_history()) == 2
+
+    # 重启影子账本恢复验证：旧数据已被清空，仅保留种子持仓
+    reloaded = ShadowLedger(initial_cash=100000.0, state_store=RuntimeStateRepository(db_path))
+    reloaded_snap = reloaded.take_snapshot()
+    assert reloaded_snap.gold_total_g == 15.0
+    assert reloaded_snap.cash_available == 90900.0
+
+    # 成本超过总资金时抛出异常
+    with pytest.raises(ValueError, match="超过初始资金"):
+        ledger.reset_and_seed_holdings(
+            initial_cash=5000.0,
+            holdings=[("CMBC", 10.0, 600.0)],
+        )

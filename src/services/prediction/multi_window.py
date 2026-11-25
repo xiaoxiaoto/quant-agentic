@@ -53,7 +53,7 @@ class MultiWindowFusion:
             first_key = next(iter(valid_candidates))
             return first_key, valid_candidates[first_key]
 
-        # 选择置信下界 (net_return_lcb) 最高且为正的窗口
+        # 选择置信下界 (net_return_lcb) 最高的窗口
         best_horizon = max(
             valid_candidates.keys(),
             key=lambda h: valid_candidates[h].net_return_lcb,
@@ -64,7 +64,7 @@ class MultiWindowFusion:
         self,
         predictions: dict[HoldingPeriod, ModelPrediction],
     ) -> float:
-        """计算跨周期的多窗口加权融合打分。"""
+        """计算跨周期的多窗口加权融合打分（仅纳入允许周期）。"""
         if not predictions:
             return 0.0
 
@@ -80,6 +80,8 @@ class MultiWindowFusion:
         weighted_lcb_sum = 0.0
 
         for h, pred in predictions.items():
+            if h not in self._allowed_horizons:
+                continue
             w = weights.get(h, 0.0)
             weighted_lcb_sum += pred.net_return_lcb * w
             total_weight += w

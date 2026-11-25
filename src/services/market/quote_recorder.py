@@ -10,9 +10,9 @@
 """
 
 import hashlib
-import json
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 
 from src.contracts.domains.quote import QuoteDerived, QuoteRaw
 from src.contracts.enums.trading import DataQualityState
@@ -25,11 +25,14 @@ class QuoteRecorder:
 
     def __init__(
         self,
-        storage_dir: Path | str = "data/quotes",
+        storage_dir: Path | str = "data",
         quality_guard: DataQualityGuard | None = None,
+        repository: QuoteRepository | None = None,
     ) -> None:
         self._storage_dir = Path(storage_dir)
         self._guard = quality_guard or DataQualityGuard()
+        self._repository = repository or QuoteRepository(storage_dir=self._storage_dir)
+        self._lock = Lock()
         self._latest_quote: QuoteRaw | None = None
         self._latest_derived: QuoteDerived | None = None
         self._total_recorded: int = 0
@@ -47,11 +50,7 @@ class QuoteRecorder:
         return self._storage_dir / f"quotes_{date_str}.jsonl"
 
     def _append_to_log(self, quote: QuoteRaw) -> None:
-        file_path = self._get_daily_file_path(quote.received_at)
-        quote.record_hash = QuoteRepository.compute_record_hash(quote)
-        record = quote.model_dump(mode="json")
-        with open(file_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._repository.save_quote(quote)
 
     def _derive_metrics(
         self,
@@ -108,18 +107,19 @@ class QuoteRecorder:
 
         quality_state = self._guard.validate_and_classify(quote, now=received_at)
         quote.quality_state = quality_state
-
-        if quality_state == DataQualityState.NORMAL:
-            quote.available_at = received_at
-            self._latest_quote = quote
-            self._latest_derived = self._derive_metrics(quote, intl_ref_cny)
-        else:
-            self._total_anomalies += 1
-
-        self._append_to_log(quote)
-        self._total_recorded += 1
-
         derived = self._derive_metrics(quote, intl_ref_cny)
+
+        with self._lock:
+            if quality_state == DataQualityState.NORMAL:
+                quote.available_at = received_at
+                self._latest_quote = quote
+                self._latest_derived = derived
+            else:
+                self._total_anomalies += 1
+
+            self._append_to_log(quote)
+            self._total_recorded += 1
+
         return quote, derived
 
     @property

@@ -17,7 +17,7 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def isolated_runtime(tmp_path: Path) -> Iterator[None]:
     runtime = RuntimeDependencies(
-        Settings.model_construct(data_dir=str(tmp_path), timesfm_enabled=False, news_llm_enabled=False)
+        Settings.model_construct(data_dir=str(tmp_path), timesfm_enabled=False, news_enabled=False)
     )
     app.dependency_overrides[RuntimeDependencies.from_request] = lambda: runtime
     yield
@@ -280,7 +280,7 @@ def test_runtime_applies_configured_fees_and_quality_threshold(tmp_path: Path) -
         Settings.model_construct(
             data_dir=str(tmp_path / "configured"),
             timesfm_enabled=False,
-            news_llm_enabled=False,
+            news_enabled=False,
             buy_fee_rate=0.01,
             sell_fee_rate=0.02,
         )
@@ -308,3 +308,77 @@ def test_order_reconciliation_rejects_invalid_numbers(field: str) -> None:
         },
     )
     assert response.status_code == 422
+
+
+def test_alerts_router_uses_isolated_runtime_dependencies() -> None:
+    from src.contracts.domains.decision import Decision
+    from src.contracts.domains.quote import QuoteRaw
+    from src.contracts.enums.trading import DecisionAction, HoldingPeriod
+
+    runtime = app.dependency_overrides[RuntimeDependencies.from_request]()
+    now = datetime.now(UTC)
+    decision = Decision(
+        decision_id="dec_alert_test",
+        decision_at=now,
+        action=DecisionAction.BUY,
+        delta_g=1.0,
+        target_inventory_g=1.0,
+        horizon_primary=HoldingPeriod.W1,
+        reason_codes=["TEST"],
+    )
+    quote = QuoteRaw(
+        quote_id="q_alert",
+        source_id="test_src",
+        bid_price=600.0,
+        ask_price=600.5,
+        quote_at=now,
+        received_at=now,
+        available_at=now,
+        is_tradable=True,
+    )
+    created = runtime.alerts.create_alert(decision, quote, runtime.ledger.take_snapshot(now))
+    assert created is not None
+
+    listed = client.get("/api/v1/alerts")
+    assert listed.status_code == 200
+    assert [item["alert_id"] for item in listed.json()] == [created.alert_id]
+
+    confirmed = client.post(f"/api/v1/alerts/{created.alert_id}/confirm")
+    assert confirmed.status_code == 200
+    assert confirmed.json()["state"] == "USER_CONFIRMED"
+
+
+def test_concurrent_quote_recording_preserves_integrity() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    base_time = datetime.now(UTC)
+
+    def post_one(index: int) -> int:
+        response = client.post(
+            "/api/v1/quotes",
+            json={
+                "quote_id": f"conc_{index}",
+                "source_id": f"src_{index % 3}",
+                "bid_price": 600.0 + index * 0.01,
+                "ask_price": 600.5 + index * 0.01,
+                "quote_at": (base_time + timedelta(milliseconds=index)).isoformat(),
+                "is_tradable": True,
+            },
+        )
+        return response.status_code
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        statuses = list(pool.map(post_one, range(12)))
+    assert statuses == [200] * 12
+
+    import sqlite3
+
+    from src.contracts.domains.quote import QuoteRaw
+
+    runtime = app.dependency_overrides[RuntimeDependencies.from_request]()
+    assert not list(runtime.settings.resolved_data_dir.glob("quotes_*.jsonl"))
+    with sqlite3.connect(runtime.settings.database_path) as conn:
+        rows = conn.execute("SELECT raw_json FROM quotes WHERE quote_id LIKE 'conc_%'").fetchall()
+    assert len(rows) == 12
+    saved = [QuoteRaw.model_validate_json(row[0]) for row in rows]
+    assert all(q.record_hash == runtime.quotes.compute_record_hash(q) for q in saved)

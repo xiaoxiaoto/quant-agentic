@@ -64,6 +64,10 @@ class QuoteRaw(BaseModel):
         default="GOLD_ACCUMULATION",
         description="产品代码标识",
     )
+    is_synthetic: bool = Field(
+        default=False,
+        description="是否为由参考价按配置点差合成的模拟报价（严禁进入实盘决策）",
+    )
 
 
 class QuoteDerived(BaseModel):

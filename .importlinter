@@ -2,18 +2,18 @@
 root_package = src
 
 [importlinter:contract:layers]
-name = Layered architecture (Contracts | Configs → Repo → Agents → Services → Runtime → Routers)
+name = Layered architecture (Contracts | Configs → Repositories | Clients → Agents → Services → Runtime → Routers)
 type = layers
 layers =
     src.routers
     src.runtime
     src.services
     src.agents
-    src.repositories
+    src.repositories | src.clients
     src.contracts | src.configs
 # `layers` 自顶向下读取：每项可导入其下方列出的层。
 # 同一行用 | 分隔的包处于同一层，互不可见。
-# Order: contracts|configs → repositories → agents → services → runtime → routers
+# 同层目录互不依赖：contracts|configs → repositories|clients → agents → services → runtime → routers
 
 # Add explicit pair-wise exemptions here only when truly unavoidable.
 # Example:

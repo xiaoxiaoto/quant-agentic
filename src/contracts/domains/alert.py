@@ -70,6 +70,10 @@ class AlertPayload(BaseModel):
         default="该信号为研究输出，非投资建议",
         description="合规性风险提示免责声明",
     )
+    is_reference_estimated: bool = Field(
+        default=False,
+        description="是否基于单边参考价与估算点差生成（仅限人工复核提醒，请以银行官方双边报价为准）",
+    )
     user_confirmed_at: datetime | None = Field(
         default=None,
         description="用户确认交易意图时间戳",

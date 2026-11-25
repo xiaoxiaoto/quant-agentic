@@ -5,9 +5,9 @@ that each ``src.<other-layer>`` import is to a layer this file is allowed to imp
 
 Allowed direction (a layer may import any layer to its left):
 
-    (contracts | configs) -> repositories -> agents -> services -> runtime -> routers
+    (contracts | configs) -> (repositories | clients) -> agents -> services -> runtime -> routers
 
-``contracts`` and ``configs`` are siblings at the same level and must not import each other.
+``contracts`` 和 ``configs`` 同级隔离，``repositories`` 与 ``clients`` 也同级隔离。
 Equivalently: higher-indexed layers in ``LAYER_ORDER`` may depend on lower-indexed
 layers, never the reverse. Same-layer imports are always allowed.
 
@@ -36,6 +36,7 @@ LAYERS: list[str] = [
     "contracts",
     "configs",
     "repositories",
+    "clients",
     "agents",
     "services",
     "runtime",
@@ -43,11 +44,12 @@ LAYERS: list[str] = [
 ]
 
 # 层级顺序：同一 index 的包为同级，可互相不依赖；高 index 层可依赖低 index 层，反之禁止。
-# contracts 与 configs 同处第 0 级，互不可见。
+# contracts 与 configs 同处第 0 级，repositories 与 clients 同处第 1 级，各组互不可见。
 LAYER_ORDER: dict[str, int] = {
     "contracts": 0,
     "configs": 0,
     "repositories": 1,
+    "clients": 1,
     "agents": 2,
     "services": 3,
     "runtime": 4,

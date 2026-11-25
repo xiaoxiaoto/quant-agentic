@@ -12,8 +12,6 @@ from zoneinfo import ZoneInfo
 
 from src.contracts.domains.product import SessionConfig
 
-_DEFAULT_TZ = ZoneInfo("Asia/Shanghai")
-
 
 class SessionCalendar:
     """黄金积存交易时段日历。
@@ -21,8 +19,6 @@ class SessionCalendar:
     节假日需从银行/平台公告中提取并进行版本登记。
     时段未明确时采取安全原则（默认按不可交易处理）。
     """
-
-    _WEEKEND_GAP_HOURS: float = 54.5
 
     def __init__(
         self,
@@ -80,7 +76,7 @@ class SessionCalendar:
         return delta.total_seconds() <= hours_before_close * 3600
 
     def current_session_end(self, dt: datetime) -> datetime | None:
-        """返回当前交易周的闭市时间点（周六 02:30）。
+        """返回当前连续交易时段的闭市时间点（常规周六 02:30，遇周中节假日则提前至节假日 00:00）。
 
         若 dt 不处于交易时段内则返回 None。
         """
@@ -90,21 +86,29 @@ class SessionCalendar:
         wd = local.weekday()
         days_until_close = (self._close_day - wd) % 7
         close_date = local.date() + timedelta(days=days_until_close)
+        # 检查当前日期之后至常规闭市日前是否存在周中节假日
+        probe = local.date() + timedelta(days=1)
+        while probe <= close_date:
+            if probe in self._holidays:
+                return datetime.combine(probe, time.min, tzinfo=self._tz)
+            probe += timedelta(days=1)
         return datetime.combine(close_date, self._close_time, tzinfo=self._tz)
 
     def next_session_start(self, dt: datetime) -> datetime:
-        """返回 dt 之后（或含当前非交易时段）的下一个周一 09:00 开市时间。"""
+        """返回 dt 之后的下一个非节假日开市时间（周一为常规开盘点，周二至周五顺延自 00:00）。"""
         local = self._to_local(dt)
         wd = local.weekday()
         days_until_monday = (self._open_day - wd) % 7
         if days_until_monday == 0 and local.time() >= self._open_time:
             days_until_monday = 7
         candidate = local.date() + timedelta(days=days_until_monday)
-        result = datetime.combine(candidate, self._open_time, tzinfo=self._tz)
-        # 遇节假日自动顺延至下一开市日
-        while result.date() in self._holidays:
-            result += timedelta(days=7)
-        return result
+        # 若候选开市日为节假日，逐日顺延至下一个有效交易日
+        while True:
+            cand_wd = candidate.weekday()
+            if candidate not in self._holidays and self._open_day <= cand_wd < self._close_day:
+                open_t = self._open_time if cand_wd == self._open_day else time.min
+                return datetime.combine(candidate, open_t, tzinfo=self._tz)
+            candidate += timedelta(days=1)
 
     def trading_hours_between(self, start: datetime, end: datetime) -> float:
         """估算两时间点之间的交易小时数。"""

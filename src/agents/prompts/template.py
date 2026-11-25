@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -18,11 +19,12 @@ class PromptTemplateManager:
         lstrip_blocks=True,
     )
     _week_list = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    _tz = ZoneInfo("Asia/Shanghai")
 
     @classmethod
     def _current_time_text(cls) -> str:
-        """格式化当前时间与星期几文本。"""
-        now = datetime.now()
+        """格式化当前北京时间与星期几文本。"""
+        now = datetime.now(cls._tz)
         curr = now.strftime("%Y年%m月%d日 %H:%M:%S")
         week = cls._week_list[now.weekday()]
         return f"{curr} {week}"

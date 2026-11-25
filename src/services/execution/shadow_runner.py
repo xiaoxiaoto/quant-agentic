@@ -13,7 +13,7 @@ from src.contracts.domains.execution import RFQRequest
 from src.contracts.domains.feature import ModelPrediction
 from src.contracts.domains.product import FeeRule
 from src.contracts.domains.quote import QuoteRaw
-from src.contracts.enums.trading import DecisionAction, HoldingPeriod, TradeDirection
+from src.contracts.enums.trading import DataQualityState, DecisionAction, HoldingPeriod, TradeDirection
 from src.services.decision.cost_calculator import CostCalculator
 from src.services.decision.decision_engine import DecisionEngine
 from src.services.execution.rfq_execution import RFQExecutionEngine
@@ -89,19 +89,43 @@ class ShadowRunner:
         closed_trades = 0
         total_fees = 0.0
         warmup_count = 0
+        last_valid_bid: float | None = None
+
+        # 增量特征提取会话，复用双周期公共特征与在线波动率统计，避免 O(n²) 重复计算
+        feature_stream = self._features.create_stream() if hasattr(self._features, "create_stream") else None
+        history_window: list[QuoteRaw] = []
 
         for i in range(len(sorted_quotes)):
             curr_q = sorted_quotes[i]
+            is_valid_quote = (
+                curr_q.quality_state == DataQualityState.NORMAL
+                and math.isfinite(curr_q.bid_price)
+                and math.isfinite(curr_q.ask_price)
+                and 0 < curr_q.bid_price <= curr_q.ask_price
+            )
+            if is_valid_quote:
+                last_valid_bid = curr_q.bid_price
             current_time = max(curr_q.quote_at, curr_q.received_at, curr_q.available_at or curr_q.received_at)
-            history_window = sorted_quotes[: i + 1]
 
             # 上下文不足只预热并弃权；真实推理失败不得继续生成交易建议。
             preds: dict[HoldingPeriod, ModelPrediction] = {}
             try:
-                feats = self._features.extract_features(history_window, as_of=current_time, horizon=HoldingPeriod.W1)
-                day_feats = self._features.extract_features(
-                    history_window, as_of=current_time, horizon=HoldingPeriod.D1
-                )
+                if feature_stream is not None:
+                    feats_by_horizon = feature_stream.push_and_extract(
+                        curr_q,
+                        as_of=current_time,
+                        horizons=(HoldingPeriod.W1, HoldingPeriod.D1),
+                    )
+                    feats = feats_by_horizon[HoldingPeriod.W1]
+                    day_feats = feats_by_horizon[HoldingPeriod.D1]
+                else:
+                    history_window.append(curr_q)
+                    feats = self._features.extract_features(
+                        history_window, as_of=current_time, horizon=HoldingPeriod.W1
+                    )
+                    day_feats = self._features.extract_features(
+                        history_window, as_of=current_time, horizon=HoldingPeriod.D1
+                    )
             except ModelContextUnavailableError:
                 warmup_count += 1
             else:
@@ -141,16 +165,21 @@ class ShadowRunner:
                 )
                 fill = self._rfq.simulate_execution(req, candidate_quotes=[curr_q])
                 if fill.is_filled and fill.filled_price is not None:
-                    trades_count += 1
-                    total_fees += fill.fee_cny
                     if direction == TradeDirection.BUY:
-                        ledger.record_buy(
-                            client_order_id=f"cid_{i}",
-                            grams=fill.filled_grams,
-                            price=fill.filled_price,
-                            fee=fill.fee_cny,
-                            timestamp=fill.filled_at or current_time,
-                        )
+                        try:
+                            ledger.record_buy(
+                                client_order_id=f"cid_{i}",
+                                grams=fill.filled_grams,
+                                price=fill.filled_price,
+                                fee=fill.fee_cny,
+                                timestamp=fill.filled_at or current_time,
+                            )
+                        except ValueError:
+                            # 滑点导致实际所需资金略超可用现金时按拒单处理，不中断回放
+                            pass
+                        else:
+                            trades_count += 1
+                            total_fees += fill.fee_cny
                     else:
                         previous_pnl = ledger.take_snapshot().realized_pnl
                         ledger.record_sell(
@@ -160,21 +189,24 @@ class ShadowRunner:
                             fee=fill.fee_cny,
                             timestamp=fill.filled_at or current_time,
                         )
+                        trades_count += 1
+                        total_fees += fill.fee_cny
                         # 检查已实现盈亏是否为正
                         current_snap = ledger.take_snapshot(current_time)
                         closed_trades += 1
                         if current_snap.realized_pnl > previous_pnl:
                             winning_trades += 1
 
-            # 记录净值曲线
-            ledger.mark_to_market(curr_q.bid_price)
-            snapshot = ledger.take_snapshot(current_time)
-            eq = (
-                snapshot.cash_available
-                + snapshot.cash_frozen
-                + self._calculator.exit_cash_in(snapshot.gold_total_g, curr_q.bid_price)
-            )
-            equity_curve.append(eq)
+            # 仅使用有效正常报价更新净值曲线，防止异常报价污染指标或崩溃
+            if last_valid_bid is not None:
+                ledger.mark_to_market(last_valid_bid)
+                snapshot = ledger.take_snapshot(current_time)
+                eq = (
+                    snapshot.cash_available
+                    + snapshot.cash_frozen
+                    + self._calculator.exit_cash_in(snapshot.gold_total_g, last_valid_bid)
+                )
+                equity_curve.append(eq)
 
         # 结算绩效指标
         final_equity = equity_curve[-1] if equity_curve else self._initial_cash
@@ -192,7 +224,7 @@ class ShadowRunner:
                     max_dd = dd
 
         duration_days = max((end_time - start_time).total_seconds() / 86400.0, 1.0)
-        annualized = (1.0 + total_return) ** (365.0 / duration_days) - 1.0
+        annualized = max(1.0 + total_return, 0.0) ** (365.0 / duration_days) - 1.0
 
         # 计算夏普
         sharpe: float | None = None

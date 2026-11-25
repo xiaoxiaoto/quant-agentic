@@ -212,3 +212,27 @@ def test_news_agent_prompt_managed_by_template() -> None:
     assert "黄金研究系统的新闻风险提取器" in template_prompt
     assert NewsAgent.get_system_prompt() == template_prompt
     assert NewsAgent._system_prompt == template_prompt
+
+
+def test_news_agent_catches_httpx2_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx2
+
+    async def fail_run(_payload: str) -> object:
+        raise httpx2.ConnectError("connection refused")
+
+    agent = NewsAgent("https://llm.example/v1", "test-model", "test-key")
+    monkeypatch.setattr(agent._agent, "run", fail_run)
+
+    async def run() -> None:
+        try:
+            with pytest.raises(NewsAgentError):
+                await agent.extract(
+                    title="新闻",
+                    content="正文",
+                    source="feed",
+                    published_at=PUBLISHED,
+                )
+        finally:
+            await agent.close()
+
+    asyncio.run(run())

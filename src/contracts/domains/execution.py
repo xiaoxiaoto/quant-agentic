@@ -7,7 +7,12 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from src.contracts.enums.trading import TradeDirection
+from src.contracts.domains.account import AccountSnapshot, OrderEvent
+from src.contracts.domains.alert import AlertPayload
+from src.contracts.domains.decision import Decision
+from src.contracts.domains.feature import ModelPrediction
+from src.contracts.domains.reference_quote import ReferenceQuote
+from src.contracts.enums.trading import RiskState, TradeDirection
 
 
 class RFQRequest(BaseModel):
@@ -100,4 +105,108 @@ class BatchOrderInstruction(BaseModel):
     is_executed: bool = Field(
         default=False,
         description="次开盘批量比价后是否满足条件撮合成交",
+    )
+
+
+class PaperStepResult(BaseModel):
+    """单步本地模拟交易评估与执行结果。"""
+
+    as_of: datetime = Field(
+        description="本次评估基准时间戳",
+    )
+    product_code: str = Field(
+        description="交易标的产品编码",
+    )
+    quote_id: str | None = Field(
+        default=None,
+        description="本次使用的行情标识",
+    )
+    prediction: ModelPrediction | None = Field(
+        default=None,
+        description="本次模型预测输出",
+    )
+    raw_decision: Decision | None = Field(
+        default=None,
+        description="元决策引擎原始建议",
+    )
+    approved_decision: Decision | None = Field(
+        default=None,
+        description="独立风控核验后的最终决策",
+    )
+    risk_violations: list[str] = Field(
+        default_factory=list,
+        description="触发的风控违规或阻断项列表",
+    )
+    order: OrderEvent | None = Field(
+        default=None,
+        description="已提交或已成交的模拟订单事件",
+    )
+    fill: RFQFillResult | None = Field(
+        default=None,
+        description="RFQ 成交仿真回报结果",
+    )
+    snapshot: AccountSnapshot = Field(
+        description="本次步骤完成后的影子账本快照",
+    )
+    message: str = Field(
+        default="",
+        description="本次执行摘要说明",
+    )
+
+
+class LiveStepResult(BaseModel):
+    """单步实盘辅助评估与合规提醒结果。"""
+
+    as_of: datetime = Field(
+        description="本次评估基准时间戳",
+    )
+    product_code: str = Field(
+        description="评估标的产品编码",
+    )
+    quote_id: str | None = Field(
+        default=None,
+        description="本次使用的可成交报价标识",
+    )
+    risk_state: RiskState = Field(
+        default=RiskState.NORMAL,
+        description="当前实盘风控状态",
+    )
+    kill_switch_active: bool = Field(
+        default=False,
+        description="人工急停开关是否处于激活状态",
+    )
+    prediction: ModelPrediction | None = Field(
+        default=None,
+        description="本次模型预测输出",
+    )
+    raw_decision: Decision | None = Field(
+        default=None,
+        description="元决策引擎原始建议",
+    )
+    approved_decision: Decision | None = Field(
+        default=None,
+        description="独立风控核验后的最终决策",
+    )
+    risk_violations: list[str] = Field(
+        default_factory=list,
+        description="触发的风控违规或阻断项列表",
+    )
+    alert: AlertPayload | None = Field(
+        default=None,
+        description="生成的对外合规交易提醒（观望或弃权时为空）",
+    )
+    reference_quote: ReferenceQuote | None = Field(
+        default=None,
+        description="可选最新参考行情展示信息（不参与交易决策）",
+    )
+    is_reference_estimated: bool = Field(
+        default=False,
+        description="本次评估是否基于参考价按估算点差生成（仅限人工复核提醒，严禁自动下单）",
+    )
+    snapshot: AccountSnapshot = Field(
+        description="当前本地影子账本快照",
+    )
+    message: str = Field(
+        default="",
+        description="本次实盘评估摘要说明",
     )

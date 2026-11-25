@@ -66,12 +66,19 @@ class TimesFMAgent:
         """仅在有效行情首次触发推理时加载真实模型。"""
         if self._evaluator is None:
             device = self._device
-            if device in {"auto", "mps"}:
+            if device in {"auto", "mps", "cuda"}:
                 torch = importlib.import_module("torch")
-                mps_available = torch.backends.mps.is_available()
+                cuda_mod = getattr(torch, "cuda", None)
+                cuda_available = bool(cuda_mod is not None and cuda_mod.is_available())
+                backends_mod = getattr(torch, "backends", None)
+                mps_mod = getattr(backends_mod, "mps", None)
+                mps_available = bool(mps_mod is not None and mps_mod.is_available())
+                if device == "cuda" and not cuda_available:
+                    raise RuntimeError("当前 PyTorch 环境不支持 CUDA，请检查设备或指定 cpu")
                 if device == "mps" and not mps_available:
                     raise RuntimeError("当前 PyTorch 环境不支持 MPS，请检查设备或指定 cpu")
-                device = "mps" if mps_available else "cpu"
+                if device == "auto":
+                    device = "cuda" if cuda_available else ("mps" if mps_available else "cpu")
             timesfm3 = importlib.import_module("timesfm3")
             config = timesfm3.ModelConfig(
                 checkpoint_path=self._checkpoint,
@@ -83,53 +90,58 @@ class TimesFMAgent:
         return self._evaluator
 
     def _hourly_prices(self, quotes: list[QuoteRaw], as_of: datetime) -> list[float]:
-        """逐小时因果采样，遇到超过一小时的缺口即截断上下文。"""
+        """逐小时因果采样，遇到超过一小时的缺口即截断上下文（O(N log N + context_length)）。"""
         if as_of.tzinfo is None:
             raise ValueError("预测时点必须包含时区")
         if len({(quote.source_id, quote.product_code) for quote in quotes}) > 1:
             raise ValueError("单次预测不得混合数据源或产品")
-        eligible = sorted(
-            (
-                quote
-                for quote in quotes
-                if quote.is_tradable
-                and quote.quality_state == DataQualityState.NORMAL
-                and max(quote.quote_at, quote.received_at, quote.available_at or quote.received_at) <= as_of
-            ),
-            key=lambda quote: quote.quote_at,
-        )
-        if any(not math.isfinite(quote.bid_price) or quote.bid_price <= 0 for quote in eligible):
+        eligible_pairs: list[tuple[datetime, QuoteRaw]] = []
+        for quote in quotes:
+            if quote.is_tradable and quote.quality_state == DataQualityState.NORMAL:
+                vis = max(quote.quote_at, quote.received_at, quote.available_at or quote.received_at)
+                if vis <= as_of:
+                    eligible_pairs.append((vis, quote))
+        if any(not math.isfinite(quote.bid_price) or quote.bid_price <= 0 for _, quote in eligible_pairs):
             raise ValueError("预测报价必须为有限正数")
+        if not eligible_pairs:
+            return []
+        eligible_pairs.sort(key=lambda item: (item[0], item[1].quote_at))
+        prefix_best: list[QuoteRaw] = []
+        best_so_far: QuoteRaw | None = None
+        for _, quote in eligible_pairs:
+            if best_so_far is None or quote.quote_at >= best_so_far.quote_at:
+                best_so_far = quote
+            prefix_best.append(best_so_far)
+
         end = as_of.astimezone(UTC)
         prices: list[float] = []
+        ptr = len(eligible_pairs) - 1
         for offset in range(self._context_length):
             sample_at = end - timedelta(hours=offset)
-            latest = next(
-                (
-                    quote
-                    for quote in reversed(eligible)
-                    if max(quote.quote_at, quote.received_at, quote.available_at or quote.received_at) <= sample_at
-                ),
-                None,
-            )
-            if latest is None or sample_at - latest.quote_at > timedelta(hours=1):
+            while ptr >= 0 and eligible_pairs[ptr][0] > sample_at:
+                ptr -= 1
+            if ptr < 0:
+                break
+            latest = prefix_best[ptr]
+            if sample_at - latest.quote_at > timedelta(hours=1):
                 break
             prices.append(latest.bid_price)
         return list(reversed(prices))
 
     def is_available(self) -> bool:
         """仅已加载且最近推理未失败的启用模型可用。"""
-        return self._enabled and self._evaluator is not None and self._last_error is None
+        with self._lock:
+            return self._enabled and self._evaluator is not None and self._last_error is None
 
-    def predict_feature(
+    def predict_feature_with_status(
         self,
         quotes: list[QuoteRaw],
         horizon: HoldingPeriod = HoldingPeriod.W1,
         as_of: datetime | None = None,
-    ) -> float | None:
-        """返回真实模型的终点收益预测，失败或样本不足时安全降级。"""
+    ) -> tuple[float | None, str | None]:
+        """返回 (终点收益预测, 错误码) 元组，避免并发调用方通过共享属性竞态读取错误状态。"""
         if not self._enabled:
-            return None
+            return None, None
         with self._lock:
             try:
                 effective_at = as_of or datetime.now(UTC)
@@ -140,7 +152,7 @@ class TimesFMAgent:
                 if len(prices) < self._min_context:
                     self._last_error = "连续小时报价不足"
                     self._error_code = "insufficient_context"
-                    return None
+                    return None, "insufficient_context"
                 steps = self._HORIZON_HOURS[horizon]
                 evaluator = self._load()
                 outputs = list(
@@ -162,25 +174,37 @@ class TimesFMAgent:
                     raise ValueError("模型收益预测不是有限值")
                 self._last_error = None
                 self._error_code = None
-                return round(result, 6)
+                return round(result, 6), None
             except Exception as exc:
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 self._error_code = "inference_failed"
                 logging.getLogger(__name__).warning("TimesFM 推理失败：%s", self._last_error)
-                return None
+                return None, "inference_failed"
+
+    def predict_feature(
+        self,
+        quotes: list[QuoteRaw],
+        horizon: HoldingPeriod = HoldingPeriod.W1,
+        as_of: datetime | None = None,
+    ) -> float | None:
+        """返回真实模型的终点收益预测，失败或样本不足时安全降级。"""
+        value, _ = self.predict_feature_with_status(quotes, horizon=horizon, as_of=as_of)
+        return value
 
     def get_model_info(self) -> dict[str, str | bool | float | None]:
         """返回实际模型来源、加载状态和最近失败原因。"""
-        return {
-            "model_version": self._version,
-            "checkpoint_path": self._checkpoint,
-            "requested_device": self._device,
-            "device": self._loaded_device,
-            "is_enabled": self._enabled,
-            "model_loaded": self._evaluator is not None,
-            "is_available": self.is_available(),
-            "calibration_slope": self._slope,
-            "calibration_intercept": self._intercept,
-            "last_error": self._last_error,
-            "error_code": self._error_code,
-        }
+        with self._lock:
+            available = self._enabled and self._evaluator is not None and self._last_error is None
+            return {
+                "model_version": self._version,
+                "checkpoint_path": self._checkpoint,
+                "requested_device": self._device,
+                "device": self._loaded_device,
+                "is_enabled": self._enabled,
+                "model_loaded": self._evaluator is not None,
+                "is_available": available,
+                "calibration_slope": self._slope,
+                "calibration_intercept": self._intercept,
+                "last_error": self._last_error,
+                "error_code": self._error_code,
+            }

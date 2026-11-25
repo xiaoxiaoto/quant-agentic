@@ -35,7 +35,7 @@ def test_all_enums_have_value_and_description() -> None:
         if issubclass(obj, DescribedStrEnum) and obj is not DescribedStrEnum
     ]
 
-    assert len(enum_classes) == 9  # 共有 9 个业务枚举类
+    assert len(enum_classes) == 11  # 共有 11 个业务枚举类
 
     for cls in enum_classes:
         for member in cls:

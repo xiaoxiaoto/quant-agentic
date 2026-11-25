@@ -2,11 +2,13 @@
 
 import hashlib
 import json
+import logging
 import math
 from datetime import UTC, datetime
 from typing import Literal
 
 import httpx
+import httpx2
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import Agent, NativeOutput
 from pydantic_ai.exceptions import AgentRunError, UserError
@@ -24,7 +26,7 @@ class NewsAgentError(RuntimeError):
 class NewsRiskExtraction(BaseModel):
     """限制模型只能输出风险分类、评分和摘要。"""
 
-    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False, str_strip_whitespace=True)
 
     event_type: Literal["GENERAL", "MACRO", "GEOPOLITICAL", "MONETARY", "MARKET"]
     severity: float = Field(ge=0.0, le=1.0)
@@ -63,12 +65,21 @@ class NewsAgent:
             raise ValueError("新闻模型超时必须为正且有限")
         self._model = model
         self._system_prompt = system_prompt or PromptTemplateManager.get_prompt_template(self._prompt_template_name)
-        self._client = httpx.AsyncClient(
-            base_url=base_url.rstrip("/") + "/",
-            timeout=timeout_seconds,
-            transport=transport,
-            follow_redirects=False,
-        )
+        # 生产路径使用 httpx2.AsyncClient 以兼容 pydantic-ai v3（移除了 httpx 支持）。
+        # 传入外部 transport（测试用 httpx.MockTransport）时回退到 httpx.AsyncClient。
+        if transport is not None:
+            self._client: httpx.AsyncClient | httpx2.AsyncClient = httpx.AsyncClient(
+                base_url=base_url.rstrip("/") + "/",
+                timeout=timeout_seconds,
+                transport=transport,
+                follow_redirects=False,
+            )
+        else:
+            self._client = httpx2.AsyncClient(
+                base_url=base_url.rstrip("/") + "/",
+                timeout=timeout_seconds,
+                follow_redirects=False,
+            )
 
         provider = OpenAIProvider(base_url=base_url, api_key=api_key, http_client=self._client)
         self._agent = Agent(
@@ -112,7 +123,8 @@ class NewsAgent:
             if run.response.finish_reason != "stop":
                 raise NewsAgentError("新闻模型输出未完整结束")
             result = run.output
-        except (AgentRunError, UserError, httpx.HTTPError):
+        except (AgentRunError, UserError, httpx.HTTPError, httpx2.HTTPError) as exc:
+            logging.getLogger(__name__).warning("新闻模型调用失败：%s", type(exc).__name__)
             raise NewsAgentError("新闻模型调用或结构化校验失败，请检查服务与配置") from None
 
         identity = json.dumps(news_data, ensure_ascii=False, sort_keys=True).encode()

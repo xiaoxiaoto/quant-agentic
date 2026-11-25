@@ -5,6 +5,7 @@
 当前不连接银行，也不预留资金或持仓。
 """
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from math import isfinite
 from threading import RLock
@@ -12,6 +13,7 @@ from threading import RLock
 from src.contracts.domains.account import OrderEvent
 from src.contracts.domains.execution import BatchOrderInstruction, RFQFillResult
 from src.contracts.enums.trading import OrderState, TradeDirection
+from src.repositories.runtime_state import RuntimeStateRepository
 from src.services.execution.shadow_ledger import ShadowLedger
 
 
@@ -22,32 +24,55 @@ class ExecutionAdapter:
         self,
         ledger: ShadowLedger | None = None,
         is_live_enabled: bool = False,
+        state_store: RuntimeStateRepository | None = None,
+        *,
+        kill_switch_checker: Callable[[], bool] | None = None,
     ) -> None:
         self._lock = RLock()
+        self._state_store = state_store
         self._ledger = ledger or ShadowLedger()
         self._live_enabled = is_live_enabled
         self._kill_switch_active = False
+        self._kill_switch_checker = kill_switch_checker
         self._orders: dict[str, OrderEvent] = {}
         self._id_mapping: dict[str, str] = {}  # bank_order_id -> client_order_id
         self._fills: dict[str, RFQFillResult] = {}
         self._batch_instructions: dict[str, BatchOrderInstruction] = {}
+        if self._state_store is not None:
+            _, saved_kill = self._state_store.load_control_state()
+            self._kill_switch_active = saved_kill
+            for inst in self._state_store.load_batch_instructions():
+                self._batch_instructions[inst.instruction_id] = inst
 
     def _now(self) -> datetime:
         return datetime.now(UTC)
+
+    def _persist_batch_instructions(self) -> None:
+        if self._state_store is not None:
+            self._state_store.save_batch_instructions(list(self._batch_instructions.values()))
+
+    def _persist_kill_switch(self) -> None:
+        if self._state_store is not None:
+            risk_state, _ = self._state_store.load_control_state()
+            self._state_store.save_control_state(risk_state, self._kill_switch_active)
 
     def trigger_kill_switch(self, reason: str = "MANUAL_EMERGENCY_HALT") -> None:
         """触发人工急停开关，强行阻断所有新报单。"""
         with self._lock:
             self._kill_switch_active = True
+            self._persist_kill_switch()
 
     def reset_kill_switch(self) -> None:
         """解除急停状态，恢复正常报单链路。"""
         with self._lock:
             self._kill_switch_active = False
+            self._persist_kill_switch()
 
     def is_kill_switch_active(self) -> bool:
         """检查急停开关当前是否激活。"""
         with self._lock:
+            if self._kill_switch_checker is not None:
+                return self._kill_switch_active or self._kill_switch_checker()
             return self._kill_switch_active
 
     def submit_order(
@@ -59,7 +84,7 @@ class ExecutionAdapter:
     ) -> OrderEvent:
         """报送一笔交易委托并完成前置幂等检查与状态初始化。"""
         with self._lock:
-            if self._kill_switch_active:
+            if self.is_kill_switch_active():
                 raise RuntimeError("系统处于人工急停状态，严禁提交任何新订单")
 
             if client_order_id in self._orders:
@@ -81,6 +106,7 @@ class ExecutionAdapter:
             now_dt = self._now()
             order = OrderEvent(
                 client_order_id=client_order_id,
+                order_type="LIMIT" if limit_price is not None else "MARKET",
                 direction=direction,
                 requested_grams=grams,
                 limit_price=limit_price,
@@ -187,6 +213,21 @@ class ExecutionAdapter:
     ) -> BatchOrderInstruction:
         """在非交易时段登记次开盘批量价挂单指令。"""
         with self._lock:
+            if self._kill_switch_active:
+                raise RuntimeError("系统已触发 Kill-Switch 熔断，拒绝登记批量挂单指令！")
+            if not isfinite(grams) or grams <= 0:
+                raise ValueError("批量挂单克重必须为正且有限")
+            if not isfinite(limit_price) or limit_price <= 0:
+                raise ValueError("批量挂单限价必须为正且有限")
+            existing = self._batch_instructions.get(instruction_id)
+            if existing is not None:
+                if (
+                    existing.direction != direction
+                    or existing.requested_grams != grams
+                    or existing.limit_price != limit_price
+                ):
+                    raise ValueError(f"批量挂单指令 ID 冲突：{instruction_id}")
+                return existing.model_copy(deep=True)
             inst = BatchOrderInstruction(
                 instruction_id=instruction_id,
                 direction=direction,
@@ -196,7 +237,8 @@ class ExecutionAdapter:
                 target_session_open=target_open,
             )
             self._batch_instructions[instruction_id] = inst
-            return inst
+            self._persist_batch_instructions()
+            return inst.model_copy(deep=True)
 
     def execute_batch_at_open(
         self,
@@ -209,9 +251,15 @@ class ExecutionAdapter:
         卖单需 limit_price <= batch_price 才可成交。
         """
         with self._lock:
+            if self._kill_switch_active:
+                raise RuntimeError("系统已触发 Kill-Switch 熔断，拒绝执行批量挂单指令！")
+            if not isfinite(bank_batch_price) or bank_batch_price <= 0:
+                raise ValueError("银行批量成交价必须为正且有限")
             inst = self._batch_instructions.get(instruction_id)
             if not inst:
                 raise KeyError(f"未找到挂单指令：{instruction_id}")
+            if inst.is_executed:
+                raise ValueError(f"批量挂单指令已执行，不可重复撮合：{instruction_id}")
 
             inst.batch_price = bank_batch_price
             can_fill = False
@@ -222,4 +270,5 @@ class ExecutionAdapter:
                 can_fill = inst.limit_price <= bank_batch_price
 
             inst.is_executed = can_fill
-            return can_fill, inst
+            self._persist_batch_instructions()
+            return can_fill, inst.model_copy(deep=True)

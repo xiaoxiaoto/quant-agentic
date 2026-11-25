@@ -30,15 +30,28 @@ class DecisionEngine:
         news_engine: NewsRiskEngine | None = None,
         fusion_engine: MultiWindowFusion | None = None,
         fee_rule: FeeRule | None = None,
+        cooldown_seconds: float = 0.0,
     ) -> None:
         self._calculator = CostCalculator(fee_rule)
         self._edge_th: float = edge_threshold
         self._calendar: SessionCalendar = calendar or SessionCalendar()
         self._news_engine: NewsRiskEngine = news_engine or NewsRiskEngine()
         self._fusion: MultiWindowFusion = fusion_engine or MultiWindowFusion()
+        self._cooldown_seconds: float = max(0.0, cooldown_seconds)
 
     def _now(self) -> datetime:
         return datetime.now(UTC)
+
+    def is_in_cooldown(self, as_of: datetime, last_signal_at: datetime | None) -> bool:
+        """判断指定时点是否仍处于上次有效信号后的冷却期内。"""
+        if self._cooldown_seconds <= 0 or last_signal_at is None:
+            return False
+        now_utc = as_of.astimezone(UTC) if as_of.tzinfo is not None else as_of.replace(tzinfo=UTC)
+        last_utc = (
+            last_signal_at.astimezone(UTC) if last_signal_at.tzinfo is not None else last_signal_at.replace(tzinfo=UTC)
+        )
+        elapsed = (now_utc - last_utc).total_seconds()
+        return 0.0 <= elapsed < self._cooldown_seconds
 
     def evaluate_decision(
         self,
@@ -47,6 +60,7 @@ class DecisionEngine:
         account: AccountSnapshot,
         target_buy_grams: float = 1.0,
         as_of: datetime | None = None,
+        last_signal_at: datetime | None = None,
     ) -> Decision:
         """执行完整分层决策流水线并生成不可变决策指令契约。"""
         dec_id = f"dec_{uuid.uuid4().hex[:12]}"
@@ -123,6 +137,25 @@ class DecisionEngine:
         else:
             action = DecisionAction.HOLD
             reasons.append("NO_SIGNIFICANT_EDGE")
+
+        if (
+            action in (DecisionAction.BUY, DecisionAction.SELL)
+            and self._cooldown_seconds > 0
+            and last_signal_at is not None
+        ):
+            now_utc = now_dt.astimezone(UTC) if now_dt.tzinfo is not None else now_dt.replace(tzinfo=UTC)
+            last_utc = (
+                last_signal_at.astimezone(UTC)
+                if last_signal_at.tzinfo is not None
+                else last_signal_at.replace(tzinfo=UTC)
+            )
+            elapsed = (now_utc - last_utc).total_seconds()
+            if 0.0 <= elapsed < self._cooldown_seconds:
+                action = DecisionAction.HOLD
+                delta_g = 0.0
+                target_inv = account.gold_total_g
+                risk_flags.append("COOLDOWN_ACTIVE")
+                reasons.append("SIGNAL_COOLDOWN_ACTIVE")
 
         return Decision(
             decision_id=dec_id,

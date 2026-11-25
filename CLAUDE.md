@@ -127,10 +127,10 @@ For non-exempt modules, avoid top-level business functions. Put behavior on clas
 
 ## Architecture — layered dependency direction
 
-This project follows a strict 7-layer architecture. Each layer may import any layer to its left; reverse imports are forbidden and are caught by `import-linter` and the AST test under `tests/architecture/`.
+This project follows a strict layered architecture. Each layer may import any layer to its left; reverse imports are forbidden and are caught by `import-linter` and the AST test under `tests/architecture/`.
 
 ```
-(contracts | configs) → repositories → agents → services → runtime → routers
+(contracts | configs) → (repositories | clients) → agents → services → runtime → routers
 ```
 
 | Layer | May import | Purpose |
@@ -138,8 +138,9 @@ This project follows a strict 7-layer architecture. Each layer may import any la
 | `contracts` | (nothing in `src/`) | Domain types, Pydantic v2 schemas, enums, domain exceptions |
 | `configs` | (nothing in `src/`) | Settings (Pydantic Settings), env, constants, logging config |
 | `repositories` | `contracts`, `configs` | SQLAlchemy ORM models + DB access |
-| `agents` | `contracts`, `configs`, `repositories` | Decision / orchestration (LLM tools, planners) |
-| `services` | `contracts`, `configs`, `repositories`, `agents` | Business logic |
+| `clients` | `contracts`, `configs` | External HTTP clients; sibling of repositories, mutually isolated |
+| `agents` | `contracts`, `configs`, `repositories`, `clients` | Decision / orchestration (LLM tools, planners) |
+| `services` | `contracts`, `configs`, `repositories`, `clients`, `agents` | Business logic |
 | `runtime` | all above | Shared execution primitives — DI providers, middleware, lifespan, scheduler, request context. **Must not import `routers`.** |
 | `routers` | all above | HTTP / WebSocket entry points. **Not imported by any layer** — only mounted by `main.py`. |
 | `main.py` | everything | Composition root, lives outside `src/`. Only file allowed to wire every layer. |
@@ -153,7 +154,7 @@ This project follows a strict 7-layer architecture. Each layer may import any la
 
 ## Configuration
 
-- Settings live in `src/configs/settings.py`: `Settings(AppSettings, ServerSettings, TradingSettings, ModelSettings)` composes the setting groups, so all fields land flat on `Settings`.
+- Settings live in `src/configs/settings.py`: `Settings(AppSettings, ServerSettings, TradingSettings, ModelSettings, JDSettings)` composes the setting groups, so all fields land flat on `Settings`.
 - Values are read from environment variables, falling back to the git-ignored `.env` file (loaded relative to the working directory).
 - Env names are the field names in caps: `NAME`, `HOST`, `PORT`, `DEBUG`. A field added to a group is readable as `settings.<field>`.
 - `.env.example` is the committed contract: every new field gets a default in its group **and** a line there.
@@ -164,7 +165,13 @@ This project follows a strict 7-layer architecture. Each layer may import any la
 
 ## External systems
 
-行情保存为 `DATA_DIR` 下的本地 JSONL 文件。账本、提醒、新闻事件、订单状态目前在内存中；没有数据库、缓存、队列或银行连接。真实模型与 Agent 入口为 `LightGBMAgent`（训练/加载，位于 `src/agents/lightgbm.py`）、`TimesFMAgent`（官方 TimesFM3 懒加载，位于 `src/agents/timesfm.py`）和 `NewsAgent`（Pydantic AI Agent，位于 `src/agents/news.py`）。模型配置通过 `Settings` 注入应用共享依赖；TimesFM 与 News LLM 默认开启，缺新闻模型配置时启动报错，无 LightGBM 产物时是显式标识的启发式研究模式。不可将适配器已实现等同于真实凭据、生产训练产物或生产授权已就绪。
+京东接口统一位于 `src/clients/jd_gold.py`，与 `src/repositories` 同层且互不依赖。`JDGoldGateway` 整合共享客户端和 SQLite 授权仓储；应用生命周期默认轮询全部 29 个公开参考行情品种（7 家银行积存金、京东指数、4 种国际贵金属、17 种上金所品种），最多 3 请求并发，每轮完成后等待配置周期，独立存储于 `DATA_DIR/references`，不构造双边报价、不接入交易决策。账户授权状态通过 contracts 层存储协议注入，由 `JDGoldAuthRepository` 保存到 `DATA_DIR/quant-agentic.sqlite3`；CLI `uv run python -m src.runtime.jd_auth login|complete|status|verify` 与应用共享登录态。服务运行时在到期前五分钟自动准备重新授权会话，当前上游没有续期能力，用户仍须完成浏览器授权。分析接口仍需独立密钥，模拟交易仅显式调用。
+
+参考品种、单位及价格方向统一由 `ReferenceProductCatalog` 定义。`live_quotes_products: tuple[str, ...] | None` 对应 `LIVE_QUOTES_PRODUCTS=null`（默认全部）或 JSON 数组（后台子集）；未知品种启动报错。`GET /api/v1/quotes/live/products` 返回完整清单，原 `/live/latest`、`/live/status`、`/live/collect` 接口均支持 `product_code` 查询参数，默认 `CMBC-JCJ`。新增 `/live/latest/all`、`/live/status/all` 与 `POST /live/collect/all`，全量采集返回 `list[LiveQuoteStatus]`，单个品种失败不阻断其余品种。后台子集配置不限制手动全量或单品种采集。
+
+源时间缺失时不得用接收时间代替：通用行情保留 `quote_at=null`，标记 `GAP`、`available_at=null`，仅供展示；民生专用单价入口继续严格拒绝缺失或无效源时间。具备源时间的陈旧报价标记 `STALE`，查询时重新分类。SGE 白银单位 `CNY/kg`，国际贵金属 `USD/oz`，其余 `CNY/g`；兴业、广发、浦发 `price_side=buy` 仍为不可成交单边参考价。按品种分别去重和恢复，默认方向哈希兼容旧民生日志。2026-11-18 实测 29 个品种中 28 个返回价格，浦发业务错误 `10009999`，通用行情缺有效源时间，部分 SGE 时间陈旧；不可将支持接入等同于全部实时可用。
+
+双边行情、多品种参考行情与运行时业务状态（订单、提醒、批量指令、风控/冷却状态、新闻与宏观事件、对账报告、京东账户授权）统一建表保存在 `DATA_DIR/quant-agentic.sqlite3`（SQLite WAL 模式），同时保留按日 JSONL 审计日志；没有外部缓存、队列或真实银行直连。模拟盘可通过 `SYNTHETIC_PAPER_QUOTE_ENABLED=true` 启用参考价合成双边报价（`is_synthetic=true`），实盘决策强制排除合成报价。真实模型与 Agent 入口为 `LightGBMAgent`（训练/加载，位于 `src/agents/lightgbm.py`）、`TimesFMAgent`（官方 TimesFM3 懒加载，位于 `src/agents/timesfm.py`）和 `NewsAgent`（Pydantic AI Agent，位于 `src/agents/news.py`）。模型配置通过 `Settings` 注入应用共享依赖；TimesFM 与 News LLM 默认开启，缺新闻模型配置时启动报错，无 LightGBM 产物时是显式标识的启发式研究模式。不可将适配器已实现等同于真实凭据、生产训练产物或生产授权已就绪。
 
 ## Runtime entry points
 
@@ -183,7 +190,10 @@ This project also follows the [`AGENTS.md`](https://agents.md/) convention:
 
 ## Project-specific glossary
 
-TODO(init-project): add domain terms (instruments, signals, venues, order types, …) as they land in the code.
+- **PIT（Point-in-Time）**：按 `available_at <= decision_at` 过滤历史数据，杜绝前视偏差。
+- **RFQ（Request for Quote）**：报价接受成交模型，以银行双边报价（`bid_price` / `ask_price`）而非交易所撮合模拟成交。
+- **参考行情（ReferenceQuote）**：单边参考价（`is_tradable=False`），独立存于 `DATA_DIR/references`，不进入交易决策。
+- **影子账本（ShadowLedger）**：本地内存账本与持仓成本核算引擎，以银行账单为权威并通过对账保持一致。
 
 ## Architecture standard
 

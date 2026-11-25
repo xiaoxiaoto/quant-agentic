@@ -47,10 +47,12 @@ class RFQExecutionEngine:
         # 1. 基础成交率（程序化更高，人工稍低）
         base_prob = 0.98 if request.is_programmatic else 0.92
 
-        # 2. 报价时效惩罚（quote age 过大容易触发拒单或重新报价）
-        quote_age = max((self._visible_at(quote) - quote.quote_at).total_seconds(), 0.0)
-        if quote_age > self._max_quote_age_s:
-            base_prob -= 0.35
+        # 2. 报价时效惩罚（按实际可执行时点与报价源时间之差评估，接近最大允许时效时按比例衰减）
+        effective_at = max(self._visible_at(quote), request.eligible_at)
+        quote_age = max((effective_at - quote.quote_at).total_seconds(), 0.0)
+        if self._max_quote_age_s > 0 and quote_age > self._max_quote_age_s * 0.5:
+            age_ratio = min((quote_age - self._max_quote_age_s * 0.5) / (self._max_quote_age_s * 0.5), 1.0)
+            base_prob -= 0.35 * age_ratio
 
         # 3. 点差异常扩张惩罚（高波动下拒单率上升）
         if spread_pct > 0.002:  # 点差大于 20bp
@@ -72,10 +74,13 @@ class RFQExecutionEngine:
         self,
         request: RFQRequest,
         candidate_quotes: list[QuoteRaw],
+        *,
+        allow_prior_quote: bool = False,
     ) -> RFQFillResult:
         """在报价流中撮合执行 RFQ 请求。
 
-        寻找 eligible_at 起的首条可成交报价并完成执行。
+        默认寻找 eligible_at 起的首条可成交报价；当 allow_prior_quote=True 时允许使用
+        在 eligible_at 之前已可见的当前报价，但仍严格按实际执行时点校验报价是否过期。
         """
         if not isfinite(request.grams) or request.grams <= 0:
             raise ValueError("请求克重必须为正且有限")
@@ -83,15 +88,16 @@ class RFQExecutionEngine:
             raise ValueError("可成交时间不得早于决策时间")
         fill_id = f"fill_{uuid.uuid4().hex[:10]}"
 
-        # 1. 寻找 eligible_at 之后的最早有效报价
+        # 1. 筛选有效报价：校验可成交性、时间边界与截至执行时点的报价时效
         eligible_quotes = sorted(
             (
                 q
                 for q in candidate_quotes
                 if q.is_tradable
                 and q.quality_state == DataQualityState.NORMAL
-                and self._visible_at(q) >= request.eligible_at
-                and (self._visible_at(q) - q.quote_at).total_seconds() <= self._max_quote_age_s
+                and (allow_prior_quote or self._visible_at(q) >= request.eligible_at)
+                and (max(self._visible_at(q), request.eligible_at) - q.quote_at).total_seconds()
+                <= self._max_quote_age_s
                 and isfinite(q.bid_price)
                 and isfinite(q.ask_price)
                 and 0 < q.bid_price <= q.ask_price
@@ -144,5 +150,5 @@ class RFQExecutionEngine:
             filled_grams=request.grams,
             fee_cny=fee_cny,
             slippage_cny=slippage,
-            filled_at=self._visible_at(target_quote),
+            filled_at=max(self._visible_at(target_quote), request.eligible_at),
         )

@@ -21,3 +21,7 @@ wheels/
 
 # Local data lake / storage
 data/
+
+# Web frontend
+web/node_modules/
+web/dist/

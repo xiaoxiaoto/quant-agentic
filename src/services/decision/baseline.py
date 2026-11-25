@@ -23,6 +23,8 @@ class BaselineEngine:
         fee_rule: FeeRule | None = None,
         annual_risk_free_rate: float = 0.02,
     ) -> None:
+        if not math.isfinite(initial_cash) or initial_cash <= 0:
+            raise ValueError("初始资金必须为正且有限")
         self._initial_cash = initial_cash
         self._fee_rule = fee_rule or FeeRule()
         self._rf_rate = annual_risk_free_rate
@@ -119,7 +121,7 @@ class BaselineEngine:
         """运行买入持有（一次性全仓）基准。"""
         tradable_quotes = self._valid_quotes(quotes)
         if not tradable_quotes:
-            return self.run_cash_only(quotes)
+            return self.run_cash_only(quotes).model_copy(update={"strategy_name": "BUY_AND_HOLD"})
 
         # 首个可用报价全仓买入
         first_quote = tradable_quotes[0]
@@ -155,7 +157,7 @@ class BaselineEngine:
             / 86400.0,
             1.0,
         )
-        annualized = (1.0 + total_return) ** (365.0 / duration_days) - 1.0
+        annualized = max(1.0 + total_return, 0.0) ** (365.0 / duration_days) - 1.0
 
         sharpe = self._compute_sharpe(equity_curve[1:], tradable_quotes)
 
@@ -180,10 +182,10 @@ class BaselineEngine:
             raise ValueError("定投采样间隔必须为正整数")
         tradable_quotes = self._valid_quotes(quotes)
         if not tradable_quotes:
-            return self.run_cash_only(quotes)
+            return self.run_cash_only(quotes).model_copy(update={"strategy_name": "DCA"})
 
-        # 规划定投批次
-        total_steps = max(len(tradable_quotes) // step_intervals, 1)
+        # 规划定投批次（向上取整匹配 idx % step_intervals == 0 的实际触发次数）
+        total_steps = (len(tradable_quotes) + step_intervals - 1) // step_intervals
         cash_per_step = self._initial_cash / total_steps
         buy_fee_rate = self._fee_rule.buy_fee_rate
         sell_fee_rate = self._fee_rule.sell_fee_rate
@@ -192,15 +194,18 @@ class BaselineEngine:
         accumulated_grams = 0.0
         total_fees = 0.0
         trades_count = 0
+        steps_done = 0
         equity_curve: list[float] = [self._initial_cash]
 
         for idx, q in enumerate(tradable_quotes):
-            # 每隔 step_intervals 步买入一次
-            if idx % step_intervals == 0 and remaining_cash >= cash_per_step:
+            # 每隔 step_intervals 步买入一次；最后一期投入全部剩余资金避免浮点精度漏投
+            if idx % step_intervals == 0 and remaining_cash > 1e-9:
+                steps_done += 1
+                step_cash = remaining_cash if steps_done >= total_steps else min(cash_per_step, remaining_cash)
                 cost_per_g = q.ask_price * (1.0 + buy_fee_rate)
-                bought_g = cash_per_step / cost_per_g
+                bought_g = step_cash / cost_per_g
                 fee = bought_g * q.ask_price * buy_fee_rate
-                remaining_cash -= cash_per_step
+                remaining_cash = max(remaining_cash - step_cash, 0.0)
                 accumulated_grams += bought_g
                 total_fees += fee
                 trades_count += 1
@@ -230,7 +235,7 @@ class BaselineEngine:
             / 86400.0,
             1.0,
         )
-        annualized = (1.0 + total_return) ** (365.0 / duration_days) - 1.0
+        annualized = max(1.0 + total_return, 0.0) ** (365.0 / duration_days) - 1.0
         sharpe = self._compute_sharpe(equity_curve[1:], tradable_quotes)
 
         return BaselineMetrics(

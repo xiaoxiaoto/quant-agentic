@@ -67,50 +67,47 @@ class CollectorQualityAnalyzer:
         spread_p95 = self._percentile(spreads, 0.95)
         spread_p99 = self._percentile(spreads, 0.99)
 
-        # 3. 交易时段内数据缺口检测
+        # 3. 按品种隔离执行交易时段内数据缺口检测与周末跳空统计
+        by_product: dict[str, list[QuoteRaw]] = {}
+        for q in sorted_quotes:
+            by_product.setdefault(q.product_code, []).append(q)
+
         gap_count = 0
         max_gap_s = 0.0
         gap_threshold = self._interval_s * 3.0
-
-        for i in range(1, len(sorted_quotes)):
-            prev_q = sorted_quotes[i - 1]
-            curr_q = sorted_quotes[i]
-            diff_s = self._calendar.trading_hours_between(prev_q.quote_at, curr_q.quote_at) * 3600.0
-
-            # 仅在两端均处于开市交易时段内时判定为异常缺口
-            if (
-                self._calendar.is_trading_time(prev_q.quote_at)
-                and self._calendar.is_trading_time(curr_q.quote_at)
-                and diff_s > gap_threshold
-            ):
-                gap_count += 1
-                if diff_s > max_gap_s:
-                    max_gap_s = diff_s
-
-        # 4. 周末跳空统计 (周六凌晨收盘 vs 周一上午开盘)
         weekend_gaps: list[WeekendGapRecord] = []
-        for i in range(1, len(sorted_quotes)):
-            prev_q = sorted_quotes[i - 1]
-            curr_q = sorted_quotes[i]
 
-            # 判断是否跨越了周末休市
-            time_gap_hours = (curr_q.quote_at - prev_q.quote_at).total_seconds() / 3600.0
-            if time_gap_hours >= 48.0:
-                prev_mid = (prev_q.bid_price + prev_q.ask_price) / 2.0
-                curr_mid = (curr_q.bid_price + curr_q.ask_price) / 2.0
-                gap_amt = round(curr_mid - prev_mid, 4)
-                gap_pct = round(gap_amt / prev_mid, 6) if prev_mid > 0 else 0.0
+        for prod_quotes in by_product.values():
+            for i in range(1, len(prod_quotes)):
+                prev_q = prod_quotes[i - 1]
+                curr_q = prod_quotes[i]
+                trading_h = self._calendar.trading_hours_between(prev_q.quote_at, curr_q.quote_at)
+                diff_s = trading_h * 3600.0
 
-                weekend_gaps.append(
-                    WeekendGapRecord(
-                        close_time=prev_q.quote_at,
-                        open_time=curr_q.quote_at,
-                        close_mid_price=prev_mid,
-                        open_mid_price=curr_mid,
-                        gap_amount=gap_amt,
-                        gap_pct=gap_pct,
+                if diff_s > gap_threshold:
+                    gap_count += 1
+                    if diff_s > max_gap_s:
+                        max_gap_s = diff_s
+
+                # 仅在跨越实质性休市窗口（非交易时长 >= 40 小时，区分于周中 48 小时断流）时统计为周末/长假跳空
+                wall_gap_h = (curr_q.quote_at - prev_q.quote_at).total_seconds() / 3600.0
+                non_trading_h = wall_gap_h - trading_h
+                if non_trading_h >= 40.0:
+                    prev_mid = (prev_q.bid_price + prev_q.ask_price) / 2.0
+                    curr_mid = (curr_q.bid_price + curr_q.ask_price) / 2.0
+                    gap_amt = round(curr_mid - prev_mid, 4)
+                    gap_pct = round(gap_amt / prev_mid, 6) if prev_mid > 0 else 0.0
+
+                    weekend_gaps.append(
+                        WeekendGapRecord(
+                            close_time=prev_q.quote_at,
+                            open_time=curr_q.quote_at,
+                            close_mid_price=prev_mid,
+                            open_mid_price=curr_mid,
+                            gap_amount=gap_amt,
+                            gap_pct=gap_pct,
+                        )
                     )
-                )
 
         max_w_gap = max([abs(g.gap_pct) for g in weekend_gaps], default=0.0)
         mean_w_gap = statistics.mean([abs(g.gap_pct) for g in weekend_gaps]) if weekend_gaps else 0.0

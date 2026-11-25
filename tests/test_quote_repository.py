@@ -147,8 +147,10 @@ def test_recorder_hash_verifies_all_record_fields(tmp_path: Path) -> None:
     from src.services.market.quote_recorder import QuoteRecorder
 
     now = datetime(2026, 3, 2, tzinfo=UTC)
-    QuoteRecorder(tmp_path).record("q", "s", 600.0, 600.5, now, True, raw_payload='{"bid":600}', now=now)
-    repo = QuoteRepository(tmp_path)
+    repo = QuoteRepository(tmp_path, write_jsonl=True)
+    QuoteRecorder(tmp_path, repository=repo).record(
+        "q", "s", 600.0, 600.5, now, True, raw_payload='{"bid":600}', now=now
+    )
     path = next(tmp_path.glob("*.jsonl"))
     assert repo.verify_file_integrity(path) == (1, 0)
     record = json.loads(path.read_text())
@@ -220,3 +222,54 @@ def test_pit_does_not_use_availability_before_received_at(tmp_path: Path) -> Non
     repo = QuoteRepository(tmp_path)
     repo.save_quote(quote)
     assert repo.get_latest_as_of(now) is None
+
+
+def test_verify_file_integrity_ignores_blank_lines(tmp_path: Path) -> None:
+    now = datetime(2026, 3, 2, tzinfo=UTC)
+    repo = QuoteRepository(tmp_path, write_jsonl=True)
+    repo.save_quote(
+        QuoteRaw(
+            quote_id="ok_1",
+            source_id="s",
+            bid_price=600.0,
+            ask_price=600.5,
+            quote_at=now,
+            received_at=now,
+            available_at=now,
+            is_tradable=True,
+        )
+    )
+    path = next(tmp_path.glob("quotes_*.jsonl"))
+    path.write_text("\n" + path.read_text(encoding="utf-8") + "\n   \n", encoding="utf-8")
+    assert repo.verify_file_integrity(path) == (1, 0)
+
+
+def test_mixed_naive_and_aware_timestamps_do_not_crash(tmp_path: Path) -> None:
+    repo = QuoteRepository(tmp_path, write_jsonl=True)
+    naive_quote = QuoteRaw(
+        quote_id="legacy_naive",
+        source_id="s",
+        bid_price=600.0,
+        ask_price=600.5,
+        quote_at=datetime(2026, 11, 18, 10, 0, 0),
+        received_at=datetime(2026, 11, 18, 10, 0, 1, tzinfo=UTC),
+        available_at=datetime(2026, 11, 18, 10, 0, 1, tzinfo=UTC),
+        is_tradable=True,
+    )
+    repo.save_quote(naive_quote)
+
+    as_of = datetime(2026, 11, 18, 12, 0, 0, tzinfo=UTC)
+    latest = repo.get_latest_as_of(as_of=as_of)
+    assert latest is not None
+    assert latest.quote_id == "legacy_naive"
+    assert latest.quote_at.tzinfo == UTC
+
+    series = repo.query_pit_series(
+        start_time=datetime(2026, 11, 18, 0, 0, 0, tzinfo=UTC),
+        end_time=as_of,
+        as_of=as_of,
+    )
+    assert [item.quote_id for item in series] == ["legacy_naive"]
+
+    path = next(tmp_path.glob("quotes_*.jsonl"))
+    assert repo.verify_file_integrity(path) == (1, 0)

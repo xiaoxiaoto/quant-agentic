@@ -25,7 +25,7 @@ from src.services.prediction.feature_engine import FeatureEngine
 @pytest.fixture
 def runtime(tmp_path: Path) -> Iterator[RuntimeDependencies]:
     instance = RuntimeDependencies(
-        Settings.model_construct(data_dir=str(tmp_path), timesfm_enabled=False, news_llm_enabled=False)
+        Settings.model_construct(data_dir=str(tmp_path), timesfm_enabled=False, news_enabled=False)
     )
     app.dependency_overrides[RuntimeDependencies.from_request] = lambda: instance
     yield instance
@@ -156,9 +156,9 @@ def test_enabled_timesfm_missing_context_stops_decision(runtime: RuntimeDependen
 def test_enabled_news_rejects_missing_model_configuration(tmp_path: Path) -> None:
     defaults = Settings.model_construct()
     assert defaults.timesfm_enabled
-    assert defaults.news_llm_enabled
+    assert defaults.news_enabled
     with pytest.raises(ValueError, match="名称和密钥"):
-        RuntimeDependencies(Settings.model_construct(data_dir=str(tmp_path), news_llm_enabled=True))
+        RuntimeDependencies(Settings.model_construct(data_dir=str(tmp_path), news_enabled=True))
 
 
 @pytest.mark.parametrize("field", ["quote_at", "received_at", "available_at"])
@@ -240,7 +240,7 @@ def test_real_lightgbm_artifact_reaches_runtime_and_decision_api(tmp_path: Path)
             data_dir=str(tmp_path / "quotes"),
             lightgbm_model_dir=str(model_dir),
             timesfm_enabled=False,
-            news_llm_enabled=False,
+            news_enabled=False,
         )
     )
     app.dependency_overrides[RuntimeDependencies.from_request] = lambda: configured

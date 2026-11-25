@@ -7,6 +7,7 @@ INTENT_CREATED -> RISK_REJECTED / ALERT_SENT -> EXPIRED / USER_CONFIRMED / USER_
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from threading import RLock
 
 from src.contracts.domains.account import AccountSnapshot
 from src.contracts.domains.alert import AlertPayload
@@ -14,6 +15,7 @@ from src.contracts.domains.decision import Decision
 from src.contracts.domains.product import FeeRule
 from src.contracts.domains.quote import QuoteRaw
 from src.contracts.enums.trading import AlertState, DecisionAction
+from src.repositories.runtime_state import RuntimeStateRepository
 from src.services.decision.cost_calculator import CostCalculator
 
 
@@ -25,10 +27,22 @@ class AlertService:
         default_validity_minutes: float = 15.0,
         cost_calculator: CostCalculator | None = None,
         fee_rule: FeeRule | None = None,
+        state_store: RuntimeStateRepository | None = None,
     ) -> None:
+        self._lock = RLock()
+        self._state_store = state_store
         self._validity_m: float = default_validity_minutes
         self._calculator: CostCalculator = cost_calculator or CostCalculator(fee_rule)
         self._alerts: dict[str, AlertPayload] = {}
+        self._alerts_by_decision: dict[str, str] = {}
+        if self._state_store is not None:
+            for item in self._state_store.load_alerts():
+                self._alerts[item.alert_id] = item
+                self._alerts_by_decision[item.decision_id] = item.alert_id
+
+    def _persist_alert(self, alert: AlertPayload) -> None:
+        if self._state_store is not None:
+            self._state_store.upsert_alert(alert)
 
     def _now(self) -> datetime:
         return datetime.now(UTC)
@@ -63,6 +77,8 @@ class AlertService:
         quote: QuoteRaw,
         account: AccountSnapshot,
         validity_minutes: float | None = None,
+        *,
+        is_reference_estimated: bool = False,
     ) -> AlertPayload | None:
         """根据风控审核通过的决策建议生成对外提醒。
 
@@ -71,99 +87,132 @@ class AlertService:
         if decision.action not in (DecisionAction.BUY, DecisionAction.SELL):
             return None
 
-        now_dt = self._now()
-        val_m = self._validity_m if validity_minutes is None else validity_minutes
-        expires_at = now_dt + timedelta(minutes=val_m)
-        if decision.expires_at is not None:
-            expires_at = min(expires_at, decision.expires_at)
-        alert_id = f"alt_{uuid.uuid4().hex[:10]}"
+        with self._lock:
+            existing_id = self._alerts_by_decision.get(decision.decision_id)
+            if existing_id is not None and existing_id in self._alerts:
+                return self._alerts[existing_id]
 
-        spread = round(quote.ask_price - quote.bid_price, 4)
-        break_even = self._compute_break_even_price(decision.action, quote.ask_price, quote.bid_price)
-        net_loss = self._compute_net_exit_loss(quote.ask_price, spread)
+            now_dt = self._now()
+            val_m = self._validity_m if validity_minutes is None else validity_minutes
+            expires_at = now_dt + timedelta(minutes=val_m)
+            if decision.expires_at is not None:
+                expires_at = min(expires_at, decision.expires_at)
+            alert_id = f"alt_{uuid.uuid4().hex[:10]}"
 
-        payload = AlertPayload(
-            alert_id=alert_id,
-            decision_id=decision.decision_id,
-            created_at=now_dt,
-            expires_at=expires_at,
-            action=decision.action,
-            suggested_grams=abs(decision.delta_g),
-            current_bid_price=quote.bid_price,
-            current_ask_price=quote.ask_price,
-            spread=spread,
-            break_even_price=break_even,
-            net_exit_loss_cny=net_loss,
-            horizon_primary=decision.horizon_primary,
-            reason_codes=decision.reason_codes,
-            risk_flags=decision.risk_flags,
-            state=AlertState.ALERT_SENT,
-            disclaimer="该信号为研究输出，非投资建议",
-        )
-        self._alerts[alert_id] = payload
-        return payload
+            spread = round(quote.ask_price - quote.bid_price, 4)
+            break_even = self._compute_break_even_price(decision.action, quote.ask_price, quote.bid_price)
+            net_loss = self._compute_net_exit_loss(quote.ask_price, spread)
+            initial_state = AlertState.EXPIRED if expires_at <= now_dt else AlertState.ALERT_SENT
+            risk_flags = list(decision.risk_flags)
+            if is_reference_estimated and "REFERENCE_ESTIMATED_QUOTE" not in risk_flags:
+                risk_flags.append("REFERENCE_ESTIMATED_QUOTE")
+            disclaimer = (
+                "该信号基于单边参考价与估算点差生成，非投资建议，请以银行官方实时双边报价为准"
+                if is_reference_estimated
+                else "该信号为研究输出，非投资建议"
+            )
+
+            payload = AlertPayload(
+                alert_id=alert_id,
+                decision_id=decision.decision_id,
+                created_at=now_dt,
+                expires_at=expires_at,
+                action=decision.action,
+                suggested_grams=abs(decision.delta_g),
+                current_bid_price=quote.bid_price,
+                current_ask_price=quote.ask_price,
+                spread=spread,
+                break_even_price=break_even,
+                net_exit_loss_cny=net_loss,
+                horizon_primary=decision.horizon_primary,
+                reason_codes=decision.reason_codes,
+                risk_flags=risk_flags,
+                state=initial_state,
+                disclaimer=disclaimer,
+                is_reference_estimated=is_reference_estimated,
+            )
+            self._alerts[alert_id] = payload
+            self._alerts_by_decision[decision.decision_id] = alert_id
+            self._persist_alert(payload)
+            return payload
 
     def confirm_alert(self, alert_id: str) -> AlertPayload:
         """用户确认交易意向。"""
-        alert = self.get_alert(alert_id)
-        if not alert:
-            raise KeyError(f"未找到指定的提醒条目：{alert_id}")
-        if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
-            raise ValueError(f"当前提醒状态不可确认为意向：{alert.state.value}")
-        if self.is_expired(alert):
-            alert.state = AlertState.EXPIRED
-            raise ValueError(f"提醒已过有效期：{alert_id}")
-        if alert.state != AlertState.ALERT_SENT:
-            raise ValueError(f"当前提醒状态不可确认为意向：{alert.state.value}")
+        with self._lock:
+            alert = self._alerts.get(alert_id)
+            if not alert:
+                raise KeyError(f"未找到指定的提醒条目：{alert_id}")
+            if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
+                raise ValueError(f"当前提醒状态不可确认为意向：{alert.state.value}")
+            if self.is_expired(alert):
+                alert.state = AlertState.EXPIRED
+                self._persist_alert(alert)
+                raise ValueError(f"提醒已过有效期：{alert_id}")
+            if alert.state != AlertState.ALERT_SENT:
+                raise ValueError(f"当前提醒状态不可确认为意向：{alert.state.value}")
 
-        alert.state = AlertState.USER_CONFIRMED
-        alert.user_confirmed_at = self._now()
-        return alert
+            alert.state = AlertState.USER_CONFIRMED
+            alert.user_confirmed_at = self._now()
+            self._persist_alert(alert)
+            return alert
 
     def decline_alert(self, alert_id: str) -> AlertPayload:
         """用户拒绝本次交易建议。"""
-        alert = self.get_alert(alert_id)
-        if not alert:
-            raise KeyError(f"未找到指定的提醒条目：{alert_id}")
-        if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
-            raise ValueError(f"当前提醒状态不可拒绝建议：{alert.state.value}")
-        alert.state = AlertState.USER_DECLINED
-        return alert
+        with self._lock:
+            alert = self._alerts.get(alert_id)
+            if not alert:
+                raise KeyError(f"未找到指定的提醒条目：{alert_id}")
+            if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
+                raise ValueError(f"当前提醒状态不可拒绝建议：{alert.state.value}")
+            if self.is_expired(alert):
+                alert.state = AlertState.EXPIRED
+                self._persist_alert(alert)
+                raise ValueError(f"提醒已过有效期：{alert_id}")
+            alert.state = AlertState.USER_DECLINED
+            self._persist_alert(alert)
+            return alert
 
     def mark_executed(self, alert_id: str) -> AlertPayload:
         """用户标记已在银行界面完成实际下单。"""
-        alert = self.get_alert(alert_id)
-        if not alert:
-            raise KeyError(f"未找到指定的提醒条目：{alert_id}")
-        if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
-            raise ValueError(f"当前提醒状态不可标记为已执行：{alert.state.value}")
+        with self._lock:
+            alert = self._alerts.get(alert_id)
+            if not alert:
+                raise KeyError(f"未找到指定的提醒条目：{alert_id}")
+            if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
+                raise ValueError(f"当前提醒状态不可标记为已执行：{alert.state.value}")
 
-        if self.is_expired(alert):
-            alert.state = AlertState.EXPIRED
-            raise ValueError(f"提醒已过有效期：{alert_id}")
-        alert.state = AlertState.USER_EXECUTED
-        alert.user_executed_at = self._now()
-        return alert
+            if self.is_expired(alert):
+                alert.state = AlertState.EXPIRED
+                self._persist_alert(alert)
+                raise ValueError(f"提醒已过有效期：{alert_id}")
+            alert.state = AlertState.USER_EXECUTED
+            alert.user_executed_at = self._now()
+            self._persist_alert(alert)
+            return alert
 
     def mark_not_executed(self, alert_id: str) -> AlertPayload:
         """用户标记放弃或未在银行成功下单。"""
-        alert = self.get_alert(alert_id)
-        if not alert:
-            raise KeyError(f"未找到指定的提醒条目：{alert_id}")
-        if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED, AlertState.EXPIRED):
-            raise ValueError(f"当前提醒状态不可标记为未执行：{alert.state.value}")
-        alert.state = AlertState.NOT_EXECUTED
-        return alert
+        with self._lock:
+            alert = self._alerts.get(alert_id)
+            if not alert:
+                raise KeyError(f"未找到指定的提醒条目：{alert_id}")
+            if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED, AlertState.EXPIRED):
+                raise ValueError(f"当前提醒状态不可标记为未执行：{alert.state.value}")
+            alert.state = AlertState.NOT_EXECUTED
+            self._persist_alert(alert)
+            return alert
 
     def check_and_expire_alerts(self, current_time: datetime | None = None) -> list[str]:
-        """批量扫描并作废已超期的待处理提醒。"""
+        """批量扫描并作废已超期的待处理提醒，并同步持久化状态变更。"""
         now_dt = current_time or self._now()
         expired_ids: list[str] = []
-        for a_id, alert in self._alerts.items():
-            if alert.state in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
-                if now_dt >= alert.expires_at:
-                    alert.state = AlertState.EXPIRED
-                    expired_ids.append(a_id)
+        with self._lock:
+            for a_id, alert in self._alerts.items():
+                if alert.state in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
+                    if now_dt >= alert.expires_at:
+                        alert.state = AlertState.EXPIRED
+                        self._persist_alert(alert)
+                        expired_ids.append(a_id)
         return expired_ids
 
     def is_expired(self, alert: AlertPayload, current_time: datetime | None = None) -> bool:
@@ -173,7 +222,8 @@ class AlertService:
 
     def get_alert(self, alert_id: str) -> AlertPayload | None:
         """根据唯一标识查询提醒详情。"""
-        return self._alerts.get(alert_id)
+        with self._lock:
+            return self._alerts.get(alert_id)
 
     def list_alerts(
         self,
@@ -181,7 +231,8 @@ class AlertService:
         limit: int = 50,
     ) -> list[AlertPayload]:
         """按时间倒序查询历史提醒列表。"""
-        items = list(self._alerts.values())
+        with self._lock:
+            items = list(self._alerts.values())
         if state is not None:
             items = [item for item in items if item.state == state]
         items.sort(key=lambda a: a.created_at, reverse=True)

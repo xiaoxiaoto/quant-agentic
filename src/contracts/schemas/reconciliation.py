@@ -38,8 +38,8 @@ class ReconcileStatement(BankStatementItem):
 class SnapshotReconcileRequest(BaseModel):
     """资产快照对账请求载荷模型。"""
 
-    bank_cash: FiniteFloat = Field(description="银行官方账户现金余额（元）")
-    bank_gold_g: FiniteFloat = Field(description="银行官方黄金持仓总克重（克）")
+    bank_cash: FiniteFloat = Field(ge=0, description="银行官方账户现金余额（元）")
+    bank_gold_g: FiniteFloat = Field(ge=0, description="银行官方黄金持仓总克重（克）")
     bank_cost_basis: PositiveFloat | None = Field(
         default=None, allow_inf_nan=False, description="银行官方加权成本单价（元/克）"
     )

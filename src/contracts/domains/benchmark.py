@@ -122,3 +122,29 @@ class ShadowRunReport(BaseModel):
         default="",
         description="影子运行绩效评价总结",
     )
+
+
+class BacktestSummary(BaseModel):
+    """历史回测与被动基准横向对比汇总报告。"""
+
+    product_code: str = Field(
+        description="回测标的产品编码",
+    )
+    quote_count: int = Field(
+        default=0,
+        description="纳入回测的有效行情条数",
+    )
+    shadow_report: ShadowRunReport = Field(
+        description="全链路策略影子仿真绩效报告",
+    )
+    baseline_report: BaselineComparisonReport = Field(
+        description="现金、买入持有与定投基准对比报告",
+    )
+    excess_return_vs_buy_and_hold: float | None = Field(
+        default=None,
+        description="相对买入持有基准的累计超额收益率",
+    )
+    excess_return_vs_dca: float | None = Field(
+        default=None,
+        description="相对定投基准的累计超额收益率",
+    )

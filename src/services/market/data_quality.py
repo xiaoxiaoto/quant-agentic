@@ -9,7 +9,10 @@
 6. 行情断流与陈旧状态判定。
 """
 
+from collections import OrderedDict
 from datetime import UTC, datetime
+from math import isfinite
+from threading import Lock
 
 from src.contracts.domains.quote import QuoteRaw
 from src.contracts.enums.trading import DataQualityState
@@ -24,13 +27,16 @@ class DataQualityGuard:
         max_price_jump_pct: float = 0.03,
         max_spread_pct: float = 0.02,
         stale_threshold_seconds: float = 30.0,
+        max_seen_quote_ids: int = 50_000,
     ) -> None:
+        self._lock = Lock()
         self._max_clock_skew_seconds = max_clock_skew_seconds
         self._max_price_jump_pct = max_price_jump_pct
         self._max_spread_pct = max_spread_pct
         self._stale_threshold_seconds = stale_threshold_seconds
-        self._seen_quote_ids: set[str] = set()
-        self._last_quote: QuoteRaw | None = None
+        self._max_seen_quote_ids = max_seen_quote_ids
+        self._seen_quote_ids: OrderedDict[str, None] = OrderedDict()
+        self._last_quotes: dict[str, QuoteRaw] = {}
 
     def _now(self) -> datetime:
         return datetime.now(UTC)
@@ -43,7 +49,9 @@ class DataQualityGuard:
         """对单条新报价进行质量校验并分类。"""
         current_time = now or self._now()
 
-        # 1. 价格非正或点差倒挂检查
+        # 1. 价格有限性、非正或点差倒挂检查
+        if not (isfinite(quote.bid_price) and isfinite(quote.ask_price)):
+            return DataQualityState.ANOMALY
         if quote.bid_price <= 0 or quote.ask_price <= 0:
             return DataQualityState.ANOMALY
         if quote.ask_price < quote.bid_price:
@@ -54,39 +62,43 @@ class DataQualityGuard:
         if (quote.quote_at - recv).total_seconds() > self._max_clock_skew_seconds:
             return DataQualityState.ANOMALY
 
-        # 3. 唯一报价 ID 重复校验
-        if quote.quote_id in self._seen_quote_ids:
-            return DataQualityState.ANOMALY
-
-        # 4. 时间戳倒流（乱序）检查
-        if self._last_quote is not None:
-            if quote.quote_at < self._last_quote.quote_at:
-                return DataQualityState.ANOMALY
-
-            # 5. 中间价异常跳价检查
-            last_mid = (self._last_quote.bid_price + self._last_quote.ask_price) / 2.0
-            cur_mid = (quote.bid_price + quote.ask_price) / 2.0
-            if last_mid > 0:
-                jump = abs(cur_mid / last_mid - 1.0)
-                if jump > self._max_price_jump_pct:
-                    return DataQualityState.ANOMALY
-
         # 6. 点差率异常扩张检查
         mid = (quote.bid_price + quote.ask_price) / 2.0
         if mid > 0:
             spread_pct = (quote.ask_price - quote.bid_price) / mid
-            if spread_pct > self._max_spread_pct:
+            if not isfinite(spread_pct) or spread_pct > self._max_spread_pct:
                 return DataQualityState.ANOMALY
 
-        # 7. 报价陈旧检测（相对当前系统时钟）
-        quote_age = (current_time - min(quote.quote_at, quote.received_at)).total_seconds()
-        if quote_age > self._stale_threshold_seconds:
-            return DataQualityState.STALE
+        with self._lock:
+            # 3. 唯一报价 ID 重复校验
+            if quote.quote_id in self._seen_quote_ids:
+                return DataQualityState.ANOMALY
 
-        # 校验正常则更新状态追踪
-        self._seen_quote_ids.add(quote.quote_id)
-        self._last_quote = quote
-        return DataQualityState.NORMAL
+            # 4. 时间戳倒流（乱序）检查（按品种隔离）
+            last_quote = self._last_quotes.get(quote.product_code)
+            if last_quote is not None:
+                if quote.quote_at < last_quote.quote_at:
+                    return DataQualityState.ANOMALY
+
+                # 5. 中间价异常跳价检查
+                last_mid = (last_quote.bid_price + last_quote.ask_price) / 2.0
+                cur_mid = (quote.bid_price + quote.ask_price) / 2.0
+                if last_mid > 0:
+                    jump = abs(cur_mid / last_mid - 1.0)
+                    if not isfinite(jump) or jump > self._max_price_jump_pct:
+                        return DataQualityState.ANOMALY
+
+            # 7. 报价陈旧检测（相对当前系统时钟）
+            quote_age = (current_time - min(quote.quote_at, quote.received_at)).total_seconds()
+            if quote_age > self._stale_threshold_seconds:
+                return DataQualityState.STALE
+
+            # 校验正常则更新状态追踪并限制去重集合大小
+            self._seen_quote_ids[quote.quote_id] = None
+            while len(self._seen_quote_ids) > self._max_seen_quote_ids:
+                self._seen_quote_ids.popitem(last=False)
+            self._last_quotes[quote.product_code] = quote
+            return DataQualityState.NORMAL
 
     def is_stale(
         self,
@@ -100,5 +112,6 @@ class DataQualityGuard:
 
     def reset(self) -> None:
         """清空门禁历史状态（用于测试隔离或服务重启）。"""
-        self._seen_quote_ids.clear()
-        self._last_quote = None
+        with self._lock:
+            self._seen_quote_ids.clear()
+            self._last_quotes.clear()

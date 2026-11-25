@@ -3,7 +3,7 @@
 定义决策触发评估与风控核验相关的接口请求与响应载荷模型。
 """
 
-from pydantic import AwareDatetime, BaseModel, Field, PositiveFloat
+from pydantic import AwareDatetime, BaseModel, Field, PositiveFloat, model_validator
 
 from src.contracts.domains.decision import Decision
 from src.contracts.domains.feature import ModelPrediction
@@ -11,13 +11,20 @@ from src.contracts.domains.quote import QuoteRaw
 
 
 class DecisionQuote(QuoteRaw):
-    """参与计算的行情必须使用有限正价格和带时区时间。"""
+    """参与计算的行情必须使用有限正价格、非倒挂点差和带时区时间。"""
 
     bid_price: PositiveFloat = Field(allow_inf_nan=False)
     ask_price: PositiveFloat = Field(allow_inf_nan=False)
     quote_at: AwareDatetime
     received_at: AwareDatetime
     available_at: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def _validate_spread(self) -> "DecisionQuote":
+        """禁止买卖价倒挂进入决策评估。"""
+        if self.ask_price < self.bid_price:
+            raise ValueError("买入价（ask_price）不得低于卖出价（bid_price）")
+        return self
 
 
 class DecisionEvaluateRequest(BaseModel):

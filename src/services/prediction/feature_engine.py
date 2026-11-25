@@ -3,6 +3,7 @@
 整合价格动量、已实现波动率、银行报价微结构、基差、交易日历以及时序与新闻事件特征。
 """
 
+import bisect
 import math
 import statistics
 from datetime import UTC, datetime
@@ -90,6 +91,9 @@ class FeatureEngine:
                 q
                 for q in history_quotes
                 if q.quality_state == DataQualityState.NORMAL
+                and math.isfinite(q.bid_price)
+                and math.isfinite(q.ask_price)
+                and 0 < q.bid_price <= q.ask_price
                 and (as_of is None or max(q.quote_at, q.received_at, q.available_at or q.received_at) <= as_of)
             ),
             key=lambda q: q.quote_at,
@@ -122,23 +126,34 @@ class FeatureEngine:
         prices = [q.bid_price for q in history_quotes[-20:]]
         atr = round(statistics.stdev(prices), 4) if len(prices) >= 2 else 0.0
 
-        # 日历特征
-        hours_to_close = self._calendar.get_hours_until_weekend_close(latest_q.quote_at)
-        is_risk_window = self._calendar.is_in_weekend_risk_window(latest_q.quote_at)
-        hours_since_open = max(113.5 - hours_to_close, 0.0)
-
-        # 时序模型特征
-        timesfm_return = self._timesfm.predict_feature(
-            history_quotes, horizon=horizon, as_of=as_of or latest_q.quote_at
+        # 日历特征（统一以有效决策时点 ref_dt 为准）
+        ref_dt = as_of or latest_q.quote_at
+        hours_to_close = self._calendar.get_hours_until_weekend_close(ref_dt)
+        is_risk_window = self._calendar.is_in_weekend_risk_window(ref_dt)
+        hours_since_open = (
+            max(self._calendar.trading_hours_per_week() - hours_to_close, 0.0)
+            if self._calendar.is_trading_time(ref_dt)
+            else 0.0
         )
-        model_info = self._timesfm.get_model_info()
-        if model_info["is_enabled"] and timesfm_return is None:
-            if model_info.get("error_code") == "insufficient_context":
+
+        # 时序模型特征（优先使用原子返回状态码避免并发竞态）
+        if hasattr(self._timesfm, "predict_feature_with_status"):
+            timesfm_return, error_code = self._timesfm.predict_feature_with_status(
+                history_quotes, horizon=horizon, as_of=ref_dt
+            )
+            is_enabled = bool(self._timesfm.get_model_info()["is_enabled"])
+        else:
+            timesfm_return = self._timesfm.predict_feature(history_quotes, horizon=horizon, as_of=ref_dt)
+            model_info = self._timesfm.get_model_info()
+            is_enabled = bool(model_info["is_enabled"])
+            error_code = str(model_info.get("error_code")) if model_info.get("error_code") else None
+        if is_enabled and timesfm_return is None:
+            if error_code == "insufficient_context":
                 raise ModelContextUnavailableError("TimesFM 连续小时上下文不足")
             raise RuntimeError("已启用的 TimesFM 未生成有效特征，请检查模型状态与连续小时行情")
 
         # 新闻风险特征
-        active_flags = self._news_engine.get_active_risk_flags(as_of or latest_q.quote_at)
+        active_flags = self._news_engine.get_active_risk_flags(ref_dt)
 
         return FeatureSet(
             quote_id=latest_q.quote_id,
@@ -157,3 +172,167 @@ class FeatureEngine:
             timesfm_forecast_return=timesfm_return,
             event_risk_flag_count=len(active_flags),
         )
+
+    def create_stream(self) -> "IncrementalFeatureStream":
+        """创建增量特征提取会话，用于回测流式回放时复用公共特征与在线波动率统计。"""
+        return IncrementalFeatureStream(self)
+
+
+class IncrementalFeatureStream:
+    """流式增量特征提取器，将回测每步公共统计从 O(n) 降至 O(log n) / O(1)。"""
+
+    def __init__(self, engine: FeatureEngine) -> None:
+        self._engine = engine
+        self._quotes: list[QuoteRaw] = []
+        self._quote_ts: list[float] = []
+        self._vol_count: int = 0
+        self._vol_mean: float = 0.0
+        self._vol_m2: float = 0.0
+        self._vol_interval_sum: float = 0.0
+        self._vol_dirty: bool = False
+
+    def _add_return_sample(self, prev_q: QuoteRaw, curr_q: QuoteRaw) -> None:
+        p0 = prev_q.bid_price
+        p1 = curr_q.bid_price
+        interval = (curr_q.quote_at - prev_q.quote_at).total_seconds()
+        if p0 > 0 and interval > 0:
+            ret = (p1 - p0) / p0
+            self._vol_count += 1
+            delta = ret - self._vol_mean
+            self._vol_mean += delta / self._vol_count
+            self._vol_m2 += delta * (ret - self._vol_mean)
+            self._vol_interval_sum += interval
+
+    def _rebuild_vol_stats(self) -> None:
+        self._vol_count = 0
+        self._vol_mean = 0.0
+        self._vol_m2 = 0.0
+        self._vol_interval_sum = 0.0
+        for idx in range(1, len(self._quotes)):
+            self._add_return_sample(self._quotes[idx - 1], self._quotes[idx])
+        self._vol_dirty = False
+
+    def _current_realized_volatility(self) -> float:
+        if self._vol_dirty:
+            self._rebuild_vol_stats()
+        if self._vol_count < 2 or self._vol_interval_sum <= 0:
+            return 0.0
+        variance = max(self._vol_m2 / (self._vol_count - 1), 0.0)
+        std = math.sqrt(variance)
+        mean_interval = self._vol_interval_sum / self._vol_count
+        annual_periods = 365.0 * 86400.0 / mean_interval
+        return round(std * math.sqrt(annual_periods), 6)
+
+    def _calc_return_bisect(self, current_price: float, target_hours: float) -> float | None:
+        if not self._quotes or current_price <= 0:
+            return None
+        target_ts = self._quote_ts[-1] - target_hours * 3600.0
+        idx = bisect.bisect_right(self._quote_ts, target_ts) - 1
+        if idx < 0:
+            return None
+        past_price = self._quotes[idx].bid_price
+        if past_price > 0:
+            return round((current_price - past_price) / past_price, 6)
+        return None
+
+    def _predict_timesfm(self, horizon: HoldingPeriod, ref_dt: datetime) -> float | None:
+        timesfm = self._engine._timesfm
+        if hasattr(timesfm, "predict_feature_with_status"):
+            timesfm_return, error_code = timesfm.predict_feature_with_status(
+                self._quotes, horizon=horizon, as_of=ref_dt
+            )
+            is_enabled = bool(timesfm.get_model_info()["is_enabled"])
+        else:
+            timesfm_return = timesfm.predict_feature(self._quotes, horizon=horizon, as_of=ref_dt)
+            model_info = timesfm.get_model_info()
+            is_enabled = bool(model_info["is_enabled"])
+            error_code = str(model_info.get("error_code")) if model_info.get("error_code") else None
+        if is_enabled and timesfm_return is None:
+            if error_code == "insufficient_context":
+                raise ModelContextUnavailableError("TimesFM 连续小时上下文不足")
+            raise RuntimeError("已启用的 TimesFM 未生成有效特征，请检查模型状态与连续小时行情")
+        return timesfm_return
+
+    def push_and_extract(
+        self,
+        quote: QuoteRaw,
+        *,
+        as_of: datetime,
+        horizons: tuple[HoldingPeriod, ...],
+        intl_ref_cny: float | None = None,
+    ) -> dict[HoldingPeriod, FeatureSet]:
+        """追加单条按 PIT 到达的报价，并为多个持有期一次性提取共享特征向量。"""
+        is_valid = (
+            quote.quality_state == DataQualityState.NORMAL
+            and math.isfinite(quote.bid_price)
+            and math.isfinite(quote.ask_price)
+            and 0 < quote.bid_price <= quote.ask_price
+            and max(quote.quote_at, quote.received_at, quote.available_at or quote.received_at) <= as_of
+        )
+        if is_valid:
+            ts = quote.quote_at.timestamp()
+            if not self._quote_ts or ts >= self._quote_ts[-1]:
+                if self._quotes and not self._vol_dirty:
+                    self._add_return_sample(self._quotes[-1], quote)
+                self._quotes.append(quote)
+                self._quote_ts.append(ts)
+            else:
+                pos = bisect.bisect_right(self._quote_ts, ts)
+                self._quotes.insert(pos, quote)
+                self._quote_ts.insert(pos, ts)
+                self._vol_dirty = True
+
+        if not self._quotes:
+            empty = FeatureSet(quote_id="empty", as_of=as_of)
+            return dict.fromkeys(horizons, empty)
+
+        latest_q = self._quotes[-1]
+        mid = (latest_q.bid_price + latest_q.ask_price) / 2.0
+        spread = round(latest_q.ask_price - latest_q.bid_price, 4)
+        spread_pct = round(spread / mid, 6) if mid > 0 else 0.0
+        basis = round((mid / intl_ref_cny) - 1.0, 6) if intl_ref_cny is not None and intl_ref_cny > 0 else None
+
+        ret_1d = self._calc_return_bisect(latest_q.bid_price, target_hours=24.0)
+        ret_3d = self._calc_return_bisect(latest_q.bid_price, target_hours=72.0)
+        ret_1w = self._calc_return_bisect(latest_q.bid_price, target_hours=168.0)
+
+        r_vol = self._current_realized_volatility()
+        prices = [q.bid_price for q in self._quotes[-20:]]
+        atr = round(statistics.stdev(prices), 4) if len(prices) >= 2 else 0.0
+
+        hours_to_close = self._engine._calendar.get_hours_until_weekend_close(as_of)
+        is_risk_window = self._engine._calendar.is_in_weekend_risk_window(as_of)
+        hours_since_open = (
+            max(self._engine._calendar.trading_hours_per_week() - hours_to_close, 0.0)
+            if self._engine._calendar.is_trading_time(as_of)
+            else 0.0
+        )
+        active_flags = self._engine._news_engine.get_active_risk_flags(as_of)
+
+        base = FeatureSet(
+            quote_id=latest_q.quote_id,
+            as_of=as_of,
+            return_1d=ret_1d,
+            return_3d=ret_3d,
+            return_1w=ret_1w,
+            realized_volatility=r_vol,
+            atr=atr,
+            spread=spread,
+            spread_pct=spread_pct,
+            bank_basis=basis,
+            hours_to_weekend_close=round(hours_to_close, 2),
+            hours_since_open=round(hours_since_open, 2),
+            is_weekend_risk_window=is_risk_window,
+            timesfm_forecast_return=None,
+            event_risk_flag_count=len(active_flags),
+        )
+
+        is_timesfm_enabled = bool(self._engine._timesfm.get_model_info()["is_enabled"])
+        if not is_timesfm_enabled:
+            return dict.fromkeys(horizons, base)
+
+        result: dict[HoldingPeriod, FeatureSet] = {}
+        for horizon in horizons:
+            tf_ret = self._predict_timesfm(horizon, as_of)
+            result[horizon] = base.model_copy(update={"timesfm_forecast_return": tf_ret})
+        return result
