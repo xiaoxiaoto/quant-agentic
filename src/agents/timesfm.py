@@ -60,7 +60,8 @@ class TimesFMAgent:
         self._evaluator = evaluator
         self._last_error: str | None = None
         self._error_code: str | None = None
-        self._lock = Lock()
+        self._inference_lock = Lock()
+        self._state_lock = Lock()
 
     def _load(self) -> Any:
         """仅在有效行情首次触发推理时加载真实模型。"""
@@ -85,8 +86,11 @@ class TimesFMAgent:
                 per_core_batch_size=1,
                 device=device,
             )
-            self._evaluator = timesfm3.TimesFM3Evaluator(config)
-            self._loaded_device = str(self._evaluator.device)
+            evaluator = timesfm3.TimesFM3Evaluator(config)
+            loaded_device = str(evaluator.device)
+            with self._state_lock:
+                self._evaluator = evaluator
+                self._loaded_device = loaded_device
         return self._evaluator
 
     def _hourly_prices(self, quotes: list[QuoteRaw], as_of: datetime) -> list[float]:
@@ -130,7 +134,7 @@ class TimesFMAgent:
 
     def is_available(self) -> bool:
         """仅已加载且最近推理未失败的启用模型可用。"""
-        with self._lock:
+        with self._state_lock:
             return self._enabled and self._evaluator is not None and self._last_error is None
 
     def predict_feature_with_status(
@@ -142,7 +146,7 @@ class TimesFMAgent:
         """返回 (终点收益预测, 错误码) 元组，避免并发调用方通过共享属性竞态读取错误状态。"""
         if not self._enabled:
             return None, None
-        with self._lock:
+        with self._inference_lock:
             try:
                 effective_at = as_of or datetime.now(UTC)
                 if effective_at.tzinfo is None:
@@ -150,8 +154,9 @@ class TimesFMAgent:
                 effective_at = effective_at.astimezone(UTC)
                 prices = self._hourly_prices(quotes, effective_at)
                 if len(prices) < self._min_context:
-                    self._last_error = "连续小时报价不足"
-                    self._error_code = "insufficient_context"
+                    with self._state_lock:
+                        self._last_error = "连续小时报价不足"
+                        self._error_code = "insufficient_context"
                     return None, "insufficient_context"
                 steps = self._HORIZON_HOURS[horizon]
                 evaluator = self._load()
@@ -172,13 +177,16 @@ class TimesFMAgent:
                 result = self._slope * (target / prices[-1] - 1.0) + self._intercept
                 if not math.isfinite(result):
                     raise ValueError("模型收益预测不是有限值")
-                self._last_error = None
-                self._error_code = None
+                with self._state_lock:
+                    self._last_error = None
+                    self._error_code = None
                 return round(result, 6), None
             except Exception as exc:
-                self._last_error = f"{type(exc).__name__}: {exc}"
-                self._error_code = "inference_failed"
-                logging.getLogger(__name__).warning("TimesFM 推理失败：%s", self._last_error)
+                err_msg = f"{type(exc).__name__}: {exc}"
+                with self._state_lock:
+                    self._last_error = err_msg
+                    self._error_code = "inference_failed"
+                logging.getLogger(__name__).warning("TimesFM 推理失败：%s", err_msg)
                 return None, "inference_failed"
 
     def predict_feature(
@@ -193,7 +201,7 @@ class TimesFMAgent:
 
     def get_model_info(self) -> dict[str, str | bool | float | None]:
         """返回实际模型来源、加载状态和最近失败原因。"""
-        with self._lock:
+        with self._state_lock:
             available = self._enabled and self._evaluator is not None and self._last_error is None
             return {
                 "model_version": self._version,

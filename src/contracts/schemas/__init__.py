@@ -10,6 +10,15 @@ from src.contracts.schemas.decision import (
 from src.contracts.schemas.decision import (
     DecisionEvaluateResponse as DecisionEvaluateResponse,
 )
+from src.contracts.schemas.jd_auth import (
+    JDAuthActionResponse as JDAuthActionResponse,
+)
+from src.contracts.schemas.jd_auth import (
+    JDAuthLoginResponse as JDAuthLoginResponse,
+)
+from src.contracts.schemas.jd_auth import (
+    JDAuthStatusResponse as JDAuthStatusResponse,
+)
 from src.contracts.schemas.model import (
     MacroEventCreateRequest as MacroEventCreateRequest,
 )
@@ -33,6 +42,30 @@ from src.contracts.schemas.model import (
 )
 from src.contracts.schemas.model import (
     WalkForwardFoldReport as WalkForwardFoldReport,
+)
+from src.contracts.schemas.qlib import (
+    QlibExperimentListResponse as QlibExperimentListResponse,
+)
+from src.contracts.schemas.qlib import (
+    QlibExportReport as QlibExportReport,
+)
+from src.contracts.schemas.qlib import (
+    QlibExportRequest as QlibExportRequest,
+)
+from src.contracts.schemas.qlib import (
+    QlibFactorEvaluateReport as QlibFactorEvaluateReport,
+)
+from src.contracts.schemas.qlib import (
+    QlibFactorEvaluateRequest as QlibFactorEvaluateRequest,
+)
+from src.contracts.schemas.qlib import (
+    QlibStatusResponse as QlibStatusResponse,
+)
+from src.contracts.schemas.qlib import (
+    QlibTrainReport as QlibTrainReport,
+)
+from src.contracts.schemas.qlib import (
+    QlibTrainRequest as QlibTrainRequest,
 )
 from src.contracts.schemas.quote import (
     QuoteIngestRequest as QuoteIngestRequest,

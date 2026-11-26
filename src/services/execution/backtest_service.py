@@ -98,8 +98,8 @@ class BacktestService:
         end_time: datetime | None,
     ) -> list[QuoteRaw]:
         """从 PIT 仓储按时间顺序回放历史行情。"""
-        effective_end = end_time or datetime.now(UTC)
-        effective_start = start_time or (effective_end - timedelta(days=3650))
+        effective_end = self._to_utc(end_time) if end_time is not None else datetime.now(UTC)
+        effective_start = self._to_utc(start_time) if start_time is not None else (effective_end - timedelta(days=3650))
         if effective_start > effective_end:
             raise ValueError("回测起始时间不得晚于结束时间")
         return list(

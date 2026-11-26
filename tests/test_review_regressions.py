@@ -399,3 +399,67 @@ def test_app_lifespan_is_reentrant() -> None:
         assert client1.get("/health").status_code == 200
     with TestClient(app) as client2:
         assert client2.get("/health").status_code == 200
+
+
+def test_storage_error_maps_to_503_on_quotes_and_paper_routes(tmp_path: Path) -> None:
+    """存储层 StorageError 在行情采集与模拟盘下单路由应返回 503 而非 500/409。"""
+    from src.contracts.exceptions import StorageError
+    from src.runtime.dependencies import RuntimeDependencies
+
+    runtime = RuntimeDependencies(Settings(data_dir=str(tmp_path), live_quotes_enabled=True))
+    prev_runtime = getattr(app.state, "runtime", None)
+    app.state.runtime = runtime
+    try:
+
+        async def fail_collect(_code: str):
+            raise StorageError("sqlite locked")
+
+        def fail_submit(**_kwargs):
+            raise StorageError("sqlite locked")
+
+        runtime.live_quotes.collect_once = fail_collect  # type: ignore[method-assign]
+        runtime.paper.submit_local_order = fail_submit  # type: ignore[method-assign]
+
+        client = TestClient(app, raise_server_exceptions=False)
+        res_quote = client.post("/api/v1/quotes/live/collect?product_code=CMBC-JCJ")
+        assert res_quote.status_code == 503
+
+        res_paper = client.post(
+            "/api/v1/paper/orders",
+            json={"engine": "local", "direction": "BUY", "grams": 1.0, "product_code": "CMBC-JCJ"},
+        )
+        assert res_paper.status_code == 503
+    finally:
+        asyncio.run(runtime.close())
+        app.state.runtime = prev_runtime
+
+
+def test_bar_collector_parses_8_digit_yyyymmdd_date() -> None:
+    """8 位 YYYYMMDD 纯数字日期字符串应被正确解析而非静默丢弃。"""
+    from src.services.market.bar_collector import MarketBarCollector
+
+    parsed = MarketBarCollector._parse_datetime("20261126")
+    assert parsed is not None
+    assert parsed.year == 2026
+    assert parsed.month == 11
+    assert parsed.day == 26
+
+
+def test_csrf_same_origin_check_rejects_scheme_mismatch(tmp_path: Path) -> None:
+    """跨协议同主机 Origin 写请求应被拒绝。"""
+    from src.runtime.dependencies import RuntimeDependencies
+
+    runtime = RuntimeDependencies(Settings(data_dir=str(tmp_path), allowed_origins=()))
+    prev_runtime = getattr(app.state, "runtime", None)
+    app.state.runtime = runtime
+    try:
+        client = TestClient(app)
+        res = client.post(
+            "/api/v1/paper/orders",
+            headers={"Origin": "https://testserver", "Host": "testserver"},
+            json={"engine": "local", "direction": "BUY", "grams": 1.0},
+        )
+        assert res.status_code == 403
+    finally:
+        asyncio.run(runtime.close())
+        app.state.runtime = prev_runtime

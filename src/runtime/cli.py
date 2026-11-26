@@ -208,34 +208,25 @@ class QuantCLI:
         if action == "run":
             trade_grams = args.grams if args.grams is not None else settings.default_trade_grams
             steps = 0
-            await runtime.jd_gold.start()
-            await runtime.live_quotes.start()
-            await runtime.news_sync.start()
             try:
-                while args.max_steps is None or steps < args.max_steps:
-                    result = runtime.live.evaluate_once(
-                        product_code=product_code,
-                        trade_grams=trade_grams,
-                        reference_product_code=args.ref_product,
-                    )
-                    steps += 1
-                    print(
-                        f"[live #{steps}] 风控={result.risk_state.value} | 急停={result.kill_switch_active} | "
-                        f"{result.message}"
-                    )
-                    if args.max_steps is not None and steps >= args.max_steps:
-                        break
-                    await asyncio.sleep(args.interval)
+                async with runtime.background_collection():
+                    while args.max_steps is None or steps < args.max_steps:
+                        result = await asyncio.to_thread(
+                            runtime.live.evaluate_once,
+                            product_code=product_code,
+                            trade_grams=trade_grams,
+                            reference_product_code=args.ref_product,
+                        )
+                        steps += 1
+                        print(
+                            f"[live #{steps}] 风控={result.risk_state.value} | 急停={result.kill_switch_active} | "
+                            f"{result.message}"
+                        )
+                        if args.max_steps is not None and steps >= args.max_steps:
+                            break
+                        await asyncio.sleep(args.interval)
             except KeyboardInterrupt:
                 print("收到中断信号，实盘辅助监控循环已安全停止。")
-            finally:
-                try:
-                    await runtime.news_sync.stop()
-                finally:
-                    try:
-                        await runtime.live_quotes.stop()
-                    finally:
-                        await runtime.jd_gold.stop()
             return 0
 
         if action == "reconcile":
@@ -412,7 +403,12 @@ class QuantCLI:
 
         # 5. auth
         auth_parser = subparsers.add_parser("auth", help="京东黄金账户本机浏览器授权管理")
-        auth_parser.add_argument("action", choices=("login", "complete", "status", "verify"), help="授权操作")
+        auth_parser.add_argument(
+            "action",
+            choices=("login", "complete", "status", "verify", "renew", "session"),
+            help="授权操作",
+        )
+        auth_parser.add_argument("--headed", action="store_true", help="使用有头浏览器模式执行自动续约")
 
         return parser
 
@@ -429,7 +425,7 @@ class QuantCLI:
         if args.command == "serve":
             return cls._run_serve(args, resolved_settings)
         if args.command == "auth":
-            return asyncio.run(JDGoldAuthCommand.run_action(args.action))
+            return asyncio.run(JDGoldAuthCommand.run_action(args.action, headed=bool(args.headed)))
 
         return asyncio.run(cls._dispatch_async(args, resolved_settings))
 

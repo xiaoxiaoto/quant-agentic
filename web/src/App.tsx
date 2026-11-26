@@ -1,8 +1,9 @@
-import { ChartNoAxesCombined, CheckCircle2, FlaskConical, Newspaper, Wallet, X, XCircle } from "lucide-react";
-import { lazy, Suspense, useCallback, useState } from "react";
+import { ChartNoAxesCombined, CheckCircle2, FlaskConical, Newspaper, UserRound, Wallet, X, XCircle } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api/client";
 import type { BacktestSummary, Evaluation, TrainingPipelineReport } from "./api/types";
 import { QUERY_LABELS, useWorkspaceData } from "./api/useWorkspaceData";
+import { AccountsView } from "./components/AccountsView";
 import { MarketsView } from "./components/MarketsView";
 import { NewsView } from "./components/NewsView";
 import { OverviewView } from "./components/OverviewView";
@@ -18,6 +19,7 @@ const PAGE_META = {
   news: { title: "资讯", icon: Newspaper },
   portfolio: { title: "账本", icon: Wallet },
   research: { title: "研究", icon: FlaskConical },
+  accounts: { title: "账号管理", icon: UserRound },
 };
 
 interface ToastItem {
@@ -33,16 +35,30 @@ export default function App() {
   const [trainReport, setTrainReport] = useState<TrainingPipelineReport | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const busyActionRef = useRef<string | null>(null);
   const [killBusy, setKillBusy] = useState(false);
   const [focusAlertId, setFocusAlertId] = useState<string | null>(null);
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const { queries, jdHoldings, jdHoldingsError, lastUpdated, refreshing, refresh, rememberAlert } = useWorkspaceData(
+  const { queries, activeKeys, lastUpdated, refreshing, refresh, rememberAlert } = useWorkspaceData(
     autoRefresh,
     screenOnly,
-    activeTab === "portfolio"
+    activeTab === "portfolio",
+    activeTab
   );
+  const holdingsSnapshot = queries.holdings?.data;
+  const jdHoldings = holdingsSnapshot?.data ?? null;
+  const jdHoldingsMessage = queries.holdings?.failed
+    ? "本地持仓读取失败"
+    : holdingsSnapshot?.status === "auth_required"
+      ? "京东授权待恢复"
+      : holdingsSnapshot?.status === "stale"
+        ? "当前显示上次成功采集的持仓"
+        : holdingsSnapshot?.status === "pending"
+          ? "等待后台首次采集"
+          : null;
   const liveStatus = queries.live?.data ?? null;
+  const jdAuth = queries.jdAuth?.data ?? null;
   const modelStatus = queries.models?.data ?? null;
   const newsOverview = queries.news?.data ?? null;
   const products = queries.products?.data ?? [];
@@ -50,28 +66,66 @@ export default function App() {
   const alerts = queries.alerts?.data ?? [];
   const orders = queries.orders?.data ?? [];
   const reconReports = queries.reconciliation?.data ?? [];
-  const failedQueries = (Object.keys(QUERY_LABELS) as (keyof typeof QUERY_LABELS)[])
-    .filter((key) => queries[key]?.failed);
+  const failedQueries = activeKeys.filter((key) => queries[key]?.failed);
   const previousDataFailed = failedQueries.some((key) => queries[key]?.updatedAt);
   const quotesFailed = !!queries.quotes?.failed;
+  const cmbcLatest = quoteStatuses.find((s) => s.product_code === "CMBC-JCJ")?.latest;
+  const referenceGoldPrice =
+    cmbcLatest &&
+    cmbcLatest.quality_state !== "ANOMALY" &&
+    Number.isFinite(cmbcLatest.price) &&
+    cmbcLatest.price > 0
+      ? cmbcLatest.price
+      : null;
 
-  const notify = useCallback((type: "ok" | "error", text: string) => {
-    const id = Date.now() + Math.random();
-    setToasts((prev) => [...prev.slice(-2), { id, type, text }]);
-    window.setTimeout(() => {
-      setToasts((prev) => prev.filter((item) => item.id !== id));
-    }, 5000);
+  const toastTimersRef = useRef<Map<number, number>>(new Map());
+
+  const dismissToast = useCallback((id: number) => {
+    const timer = toastTimersRef.current.get(id);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      toastTimersRef.current.delete(id);
+    }
+    setToasts((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
-  const runAction = async (key: string, fn: () => Promise<string>) => {
+  useEffect(() => {
+    const timers = toastTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) {
+        window.clearTimeout(timer);
+      }
+      timers.clear();
+    };
+  }, []);
+
+  const notify = useCallback(
+    (type: "ok" | "error", text: string) => {
+      const id = Date.now() + Math.random();
+      setToasts((prev) => [...prev.slice(-2), { id, type, text }]);
+      const timer = window.setTimeout(() => {
+        toastTimersRef.current.delete(id);
+        setToasts((prev) => prev.filter((item) => item.id !== id));
+      }, 5000);
+      toastTimersRef.current.set(id, timer);
+    },
+    []
+  );
+
+  const runAction = async (key: string, fn: () => Promise<string>): Promise<boolean> => {
+    if (busyActionRef.current !== null) return false;
+    busyActionRef.current = key;
     setBusyAction(key);
     try {
       const message = await fn();
       notify("ok", message);
       await refresh();
+      return true;
     } catch (err) {
       notify("error", err instanceof Error ? err.message : "操作失败");
+      return false;
     } finally {
+      busyActionRef.current = null;
       setBusyAction(null);
     }
   };
@@ -104,9 +158,10 @@ export default function App() {
   };
 
   const changeKillSwitch = async () => {
-    if (killBusy) return;
+    if (killBusy || busyActionRef.current !== null) return;
     const resume = !queries.live?.failed && liveStatus?.kill_switch_active;
     if (resume && !window.confirm("解除急停会将实盘风控重置为正常。请先复核当前风控与对账结果。确认解除急停？")) return;
+    busyActionRef.current = "kill-switch";
     setKillBusy(true);
     try {
       const result = await (resume ? api.resumeLive() : api.haltLive());
@@ -115,9 +170,12 @@ export default function App() {
       notify("error", error instanceof Error ? error.message : "急停操作失败");
     } finally {
       await refresh();
+      busyActionRef.current = null;
       setKillBusy(false);
     }
   };
+
+  const effectiveBusyAction = killBusy ? "kill-switch" : busyAction;
 
   const PageIcon = activeTab === "overview" ? null : PAGE_META[activeTab].icon;
 
@@ -144,6 +202,7 @@ export default function App() {
         activeTab={activeTab}
         onChangeTab={navigate}
         liveStatus={liveStatus}
+        jdAuth={jdAuth}
         liveFailed={!!queries.live?.failed}
         liveUpdatedAt={queries.live?.updatedAt}
         autoRefresh={autoRefresh}
@@ -173,8 +232,8 @@ export default function App() {
           <OverviewView
             liveStatus={liveStatus}
             jdHoldings={jdHoldings}
-            jdHoldingsError={jdHoldingsError}
-            modelStatus={modelStatus}
+            jdHoldingsMessage={jdHoldingsMessage}
+            holdingsConfirmedAt={holdingsSnapshot?.last_success_at ?? null}
             newsOverview={newsOverview}
             products={products}
             quoteStatuses={quoteStatuses}
@@ -187,7 +246,7 @@ export default function App() {
             focusAlertId={focusAlertId}
             onAlertFocused={() => setFocusAlertId(null)}
             onEvaluateLive={evaluateLive}
-            busyAction={killBusy ? "kill-switch" : busyAction}
+            busyAction={effectiveBusyAction}
             onNavigate={navigate}
             onConfirmAlert={(id) =>
               void runAction(`confirm-${id}`, async () => {
@@ -201,12 +260,12 @@ export default function App() {
                 return `已拒绝提醒 ${id}`;
               })
             }
-            onExecuteAlert={async (id, payload) => {
-              await runAction(`exec-${id}`, async () => {
+            onExecuteAlert={(id, payload) =>
+              runAction(`exec-${id}`, async () => {
                 await api.executeAlert(id, payload);
                 return `已登记提醒 ${id} 成交（${payload.filled_grams}g @ ¥${payload.filled_price}）`;
-              });
-            }}
+              })
+            }
             onReconcileJd={() =>
               void runAction("reconcile-jd", async () => {
                 const res = await api.reconcileJdHoldings();
@@ -219,12 +278,8 @@ export default function App() {
                 return res.message;
               })
             }
-            onSyncNews={() =>
-              void runAction("news-sync", async () => {
-                const res = await api.syncNewsFlash(10);
-                return `资讯同步完成：拉取 ${res.fetched_count} 条，新增 ${res.ingested_count} 条，跳过 ${res.skipped_count} 条`;
-              })
-            }
+            onRefresh={() => void refresh()}
+            refreshing={refreshing}
           />
         )}
 
@@ -234,34 +289,24 @@ export default function App() {
             statuses={quoteStatuses}
             loading={!queries.products || !queries.quotes}
             quotesFailed={quotesFailed}
-            busyAction={busyAction}
-            onCollectAll={() =>
-              void runAction("collect-all", async () => {
-                const list = await api.collectAllQuotes();
-                const failed = list.filter((s) => s.last_error).length;
-                return `全量行情采集完成：${list.length} 个品种${failed > 0 ? `（${failed} 个失败）` : ""}`;
-              })
-            }
+            onRefresh={() => void refresh()}
+            refreshing={refreshing}
           />
         )}
 
         {activeTab === "news" && (
           <NewsView
+            syncStatus={modelStatus?.news_sync}
             newsOverview={newsOverview}
-            modelStatus={modelStatus}
-            busyAction={busyAction}
-            onSyncNews={() =>
-              void runAction("news-sync", async () => {
-                const res = await api.syncNewsFlash(10);
-                return `资讯同步完成：拉取 ${res.fetched_count} 条，新增 ${res.ingested_count} 条，跳过 ${res.skipped_count} 条`;
-              })
-            }
-            onRegisterMacro={async (payload) => {
-              await runAction("macro-add", async () => {
+            busyAction={effectiveBusyAction}
+            onRefresh={() => void refresh()}
+            refreshing={refreshing}
+            onRegisterMacro={(payload) =>
+              runAction("macro-add", async () => {
                 await api.registerMacroEvent(payload);
                 return `已登记宏观日程：${payload.event_name}`;
-              });
-            }}
+              })
+            }
           />
         )}
 
@@ -269,11 +314,14 @@ export default function App() {
           <PortfolioView
             liveStatus={liveStatus}
             jdHoldings={jdHoldings}
-            jdHoldingsError={jdHoldingsError}
-            referenceGoldPrice={quoteStatuses.find((s) => s.product_code === "CMBC-JCJ")?.latest?.price ?? null}
+            jdHoldingsMessage={jdHoldingsMessage}
+            holdingsConfirmedAt={holdingsSnapshot?.last_success_at ?? null}
+            referenceGoldPrice={referenceGoldPrice}
             orders={orders}
+            ordersLoaded={!!queries.orders?.updatedAt}
+            ordersFailed={!!queries.orders?.failed}
             reconReports={reconReports}
-            busyAction={busyAction}
+            busyAction={effectiveBusyAction}
             liveFailed={!!queries.live?.failed}
             onReconcileJd={() =>
               void runAction("reconcile-jd", async () => {
@@ -307,7 +355,7 @@ export default function App() {
         {activeTab === "research" && (
           <Suspense fallback={<p role="status" className="text-slate-300">正在加载研究页面…</p>}>
             <ResearchView
-              busyAction={busyAction}
+              busyAction={effectiveBusyAction}
               backtestResult={backtestResult}
               trainReport={trainReport}
               onRunBacktest={(params) =>
@@ -327,6 +375,60 @@ export default function App() {
               }
             />
           </Suspense>
+        )}
+
+        {activeTab === "accounts" && (
+          <AccountsView
+            authStatus={jdAuth}
+            authFailed={!!queries.jdAuth?.failed}
+            jdHoldings={jdHoldings}
+            jdHoldingsMessage={jdHoldingsMessage}
+            holdingsConfirmedAt={holdingsSnapshot?.last_success_at ?? null}
+            busyAction={effectiveBusyAction}
+            refreshing={refreshing}
+            onRefresh={() => void refresh()}
+            onStartLogin={async () => {
+              if (busyActionRef.current !== null) return null;
+              busyActionRef.current = "jd-login";
+              setBusyAction("jd-login");
+              try {
+                const res = await api.startJdLogin();
+                notify("ok", res.message);
+                void refresh();
+                return res.authorize_url;
+              } catch (err) {
+                notify("error", err instanceof Error ? err.message : "操作失败");
+                return null;
+              } finally {
+                busyActionRef.current = null;
+                setBusyAction(null);
+              }
+            }}
+            onCompleteLogin={() =>
+              runAction("jd-complete", async () => {
+                const res = await api.completeJdLogin();
+                return res.message;
+              })
+            }
+            onRenewAuth={() =>
+              runAction("jd-renew", async () => {
+                const res = await api.renewJdAuth();
+                return res.message;
+              })
+            }
+            onVerifyAuth={async () => {
+              await runAction("jd-verify", async () => {
+                const res = await api.verifyJdAuth();
+                return res.message;
+              });
+            }}
+            onLogout={() =>
+              runAction("jd-logout", async () => {
+                const res = await api.logoutJdAuth();
+                return res.message;
+              })
+            }
+          />
         )}
       </main>
 
@@ -352,7 +454,7 @@ export default function App() {
               <button
                 type="button"
                 aria-label="关闭通知"
-                onClick={() => setToasts((prev) => prev.filter((item) => item.id !== toast.id))}
+                onClick={() => dismissToast(toast.id)}
                 className="text-slate-500 hover:text-slate-200"
               >
                 <X className="h-3.5 w-3.5" />

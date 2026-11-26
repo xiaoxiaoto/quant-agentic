@@ -78,6 +78,7 @@ class JDGoldClient:
         )
         self._claw = claw
         self._token_deadline: float | None = None
+        self._expired_token_fingerprint: str | None = None
         self._login_session: tuple[str, SecretStr, SecretStr, float] | None = None
         self._login_lock = asyncio.Lock()
         self._auth_store = auth_store
@@ -85,6 +86,7 @@ class JDGoldClient:
         self._restore_auth()
         if configured_token.get_secret_value():
             self._access_token = configured_token
+            self._expired_token_fingerprint = None
             self._token_deadline = None
             self._persist_auth()
 
@@ -92,6 +94,7 @@ class JDGoldClient:
         """将持久化的授权状态同步到内存字段。"""
         self._access_token = state.access_token
         self._token_deadline = state.expires_at
+        self._expired_token_fingerprint = state.expired_token_fingerprint
         self._login_session = (
             (state.login_state, state.login_verifier, state.login_url, state.login_expires_at)
             if state.login_state
@@ -100,7 +103,11 @@ class JDGoldClient:
 
     def _build_auth_state(self) -> JDGoldAuthState:
         """构造待持久化的授权状态快照。"""
-        state = JDGoldAuthState(access_token=self._access_token, expires_at=self._token_deadline)
+        state = JDGoldAuthState(
+            access_token=self._access_token,
+            expires_at=self._token_deadline,
+            expired_token_fingerprint=self._expired_token_fingerprint,
+        )
         if self._login_session is not None:
             state.login_state, state.login_verifier, state.login_url, state.login_expires_at = self._login_session
         return state
@@ -170,6 +177,7 @@ class JDGoldClient:
         async with self._login_lock:
             await self._restore_auth_async()
             if self._token_deadline is not None and time.time() >= self._token_deadline + JD_GOLD_REAUTH_LEAD_SECONDS:
+                self._expired_token_fingerprint = self._build_auth_state().credential_fingerprint
                 self._access_token = SecretStr("")
                 self._token_deadline = None
                 await self._persist_auth_async()
@@ -314,6 +322,7 @@ class JDGoldClient:
                 async with self._login_lock:
                     await self._restore_auth_async()
                     if token is not None and self._access_token.get_secret_value() == token:
+                        self._expired_token_fingerprint = self._build_auth_state().credential_fingerprint
                         self._access_token = SecretStr("")
                         self._token_deadline = None
                         await self._persist_auth_async()
@@ -397,7 +406,17 @@ class JDGoldClient:
             ):
                 raise JDGoldError("INVALID_ENVELOPE")
             self._access_token = SecretStr(token)
+            self._expired_token_fingerprint = None
             self._token_deadline = time.time() + expires_in / 1000 - JD_GOLD_REAUTH_LEAD_SECONDS
+            self._login_session = None
+            await self._persist_auth_async()
+
+    async def logout(self) -> None:
+        """清除本地保存的京东访问令牌与待确认登录会话。"""
+        async with self._login_lock:
+            self._access_token = SecretStr("")
+            self._token_deadline = None
+            self._expired_token_fingerprint = None
             self._login_session = None
             await self._persist_auth_async()
 

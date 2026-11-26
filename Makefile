@@ -1,4 +1,4 @@
-.PHONY: dev backtest paper live train web-install web-dev web-build lint format typecheck arch-check test check-all
+.PHONY: dev backtest paper live train qlib-status qlib-export qlib-train web-install web-dev web-build web-test lint format typecheck arch-check test check-all
 
 dev:
 	uv run uvicorn main:app --reload --port 8000
@@ -15,6 +15,15 @@ live:
 train:
 	uv run python -m src.runtime.train
 
+qlib-status:
+	uv run python -m src.runtime.qlib_research status
+
+qlib-export:
+	uv run python -m src.runtime.qlib_research export
+
+qlib-train:
+	uv run python -m src.runtime.qlib_research train
+
 web-install:
 	pnpm --dir web install
 
@@ -23,6 +32,9 @@ web-dev:
 
 web-build:
 	pnpm --dir web build
+
+web-test:
+	pnpm --dir web test
 
 lint:
 	uv run ruff check

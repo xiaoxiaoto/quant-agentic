@@ -1,4 +1,5 @@
 exclude = [
+    ".agents/workflows",
 ]
 line-length = 120
 

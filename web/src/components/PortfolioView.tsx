@@ -7,7 +7,7 @@ import {
 import { useMemo, useState } from "react";
 import type { JDHoldingsResponse, LiveStatusResponse, OrderEvent, ReconciliationReport } from "../api/types";
 
-type LotStatus = "HOLDING" | "PARTIAL" | "CLOSED" | "SELL";
+type LotStatus = "HOLDING" | "PARTIAL" | "CLOSED" | "SELL" | "UNFILLED";
 
 interface EnrichedOrder {
   order: OrderEvent;
@@ -16,17 +16,19 @@ interface EnrichedOrder {
   lotPnl: number | null;
 }
 
-function computeFifoOrders(orders: OrderEvent[], currentPrice: number | null): EnrichedOrder[] {
+export function computeFifoOrders(orders: OrderEvent[], currentPrice: number | null): EnrichedOrder[] {
   const buyLots: Array<{ idx: number; filled: number; remaining: number }> = [];
   const results: EnrichedOrder[] = orders.map((order) => ({
     order,
-    lotStatus: order.direction === "BUY" ? "HOLDING" : "SELL",
+    lotStatus: order.state !== "FILLED" ? "UNFILLED" : order.direction === "BUY" ? "HOLDING" : "SELL",
     remainingGrams: 0,
     lotPnl: null,
   }));
 
   orders.forEach((order, idx) => {
+    if (order.state !== "FILLED") return;
     const grams = order.filled_grams ?? order.requested_grams;
+    if (grams <= 0) return;
     if (order.direction === "BUY") {
       buyLots.push({ idx, filled: grams, remaining: grams });
     } else if (order.direction === "SELL") {
@@ -62,10 +64,13 @@ function computeFifoOrders(orders: OrderEvent[], currentPrice: number | null): E
 interface PortfolioViewProps {
   liveStatus: LiveStatusResponse | null;
   jdHoldings: JDHoldingsResponse | null;
-  jdHoldingsError: string | null;
+  jdHoldingsMessage: string | null;
+  holdingsConfirmedAt: string | null;
   referenceGoldPrice: number | null;
   liveFailed: boolean;
   orders: OrderEvent[];
+  ordersLoaded?: boolean;
+  ordersFailed?: boolean;
   reconReports: ReconciliationReport[];
   busyAction: string | null;
   onReconcileJd: () => void;
@@ -76,10 +81,13 @@ interface PortfolioViewProps {
 export function PortfolioView({
   liveStatus,
   jdHoldings,
-  jdHoldingsError,
+  jdHoldingsMessage,
+  holdingsConfirmedAt,
   referenceGoldPrice,
   liveFailed,
   orders,
+  ordersLoaded = true,
+  ordersFailed = false,
   reconReports,
   busyAction,
   onReconcileJd,
@@ -88,6 +96,7 @@ export function PortfolioView({
 }: PortfolioViewProps) {
   const [grams, setGrams] = useState("2");
   const [onlyHolding, setOnlyHolding] = useState(false);
+  const [orderDisplayLimit, setOrderDisplayLimit] = useState(50);
   const snap = liveStatus?.snapshot;
   const configuredInitialCash = liveStatus?.default_initial_cash ?? 100000;
   const sellFeeRate = liveStatus?.sell_fee_rate ?? 0.004;
@@ -109,15 +118,8 @@ export function PortfolioView({
       }, 0),
     [enrichedOrders]
   );
-  const hasOpenOrders = useMemo(
-    () => enrichedOrders.some((item) => item.remainingGrams > 0),
-    [enrichedOrders]
-  );
-  const displayHoldingCost = hasOpenOrders
-    ? openPositionCost
-    : jdHoldings
-      ? jdHoldings.totalGramAll * jdHoldings.avgCostPrice
-      : null;
+  const deductedCashCost = snap ? Math.max(0, configuredInitialCash - snap.cash_available) : openPositionCost;
+  const jdHoldingCost = jdHoldings ? jdHoldings.totalGramAll * jdHoldings.avgCostPrice : null;
   const holdingCount = useMemo(
     () => enrichedOrders.filter((item) => item.lotStatus === "HOLDING" || item.lotStatus === "PARTIAL").length,
     [enrichedOrders]
@@ -173,20 +175,18 @@ export function PortfolioView({
           </div>
         </div>
 
-        {!liveStatus?.jd_logged_in ? (
-          <div className="rounded-xl border border-dashed border-amber-500/20 bg-black/40 py-8 text-center text-xs text-slate-400">
-            京东账户未授权 · 请在终端执行 <code className="text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded">uv run python main.py auth login</code>
-          </div>
-        ) : jdHoldingsError ? (
-          <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs text-rose-200">
-            京东实盘持仓读取失败：{jdHoldingsError}
-          </div>
-        ) : !jdHoldings ? (
+        {!jdHoldings ? (
           <div className="rounded-xl border border-white/[0.05] bg-black/40 py-8 text-center text-xs text-slate-400">
-            正在读取京东实盘持仓…
+            {jdHoldingsMessage ?? "正在读取本地持仓…"}
           </div>
         ) : (
           <div className="space-y-4">
+            {(jdHoldingsMessage || holdingsConfirmedAt) && (
+              <p className="text-xs text-slate-400">
+                {jdHoldingsMessage && <span className="mr-3 text-amber-200">{jdHoldingsMessage}</span>}
+                {holdingsConfirmedAt && <time dateTime={holdingsConfirmedAt}>最近采集成功 {new Date(holdingsConfirmedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}</time>}
+              </p>
+            )}
             {/* 5-pillar Telemetry Matrix */}
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
               <div className="metric-panel p-3.5 sm:p-4">
@@ -219,12 +219,12 @@ export function PortfolioView({
                   持仓成本
                 </span>
                 <div className="mt-2 text-xl font-bold text-slate-100">
-                  {displayHoldingCost !== null
-                    ? `¥${displayHoldingCost.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                  {jdHoldingCost !== null
+                    ? `¥${jdHoldingCost.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                     : "—"}
                 </div>
-                <div className="mt-1 text-[10px] text-slate-400 truncate" title={hasOpenOrders ? "Σ(在持买入克重 × 成交价)" : "克重 × 均价"}>
-                  {hasOpenOrders ? "Σ(买入批次 × 成交价)" : "均价折算"}
+                <div className="mt-1 text-[10px] text-slate-400 truncate" title="京东实盘总克重 × 加权成本均价">
+                  实盘克重 × 均价
                 </div>
               </div>
 
@@ -296,10 +296,10 @@ export function PortfolioView({
                         </td>
                         <td
                           className={`px-4 py-2.5 text-right font-medium ${
-                            item.totalIncome >= 0 ? "text-emerald-300" : "text-rose-300"
+                            item.totalIncome === null ? "text-slate-400" : item.totalIncome >= 0 ? "text-emerald-300" : "text-rose-300"
                           }`}
                         >
-                          {item.totalIncome >= 0 ? "+" : "-"}¥{Math.abs(item.totalIncome).toFixed(2)}
+                          {item.totalIncome === null ? "—" : `${item.totalIncome >= 0 ? "+" : "-"}¥${Math.abs(item.totalIncome).toFixed(2)}`}
                         </td>
                       </tr>
                     ))}
@@ -336,8 +336,8 @@ export function PortfolioView({
               <div className="mt-2 text-lg font-bold text-slate-100">
                 {snap ? `¥${snap.cash_available.toLocaleString("zh-CN", { minimumFractionDigits: 2 })}` : "—"}
               </div>
-              <div className="mt-1 text-[10px] text-slate-400 truncate" title={`初始 ¥${configuredInitialCash.toLocaleString("zh-CN")} - 持仓成本 ¥${openPositionCost.toLocaleString("zh-CN")}`}>
-                扣减持仓成本 ¥{openPositionCost.toFixed(2)}
+              <div className="mt-1 text-[10px] text-slate-400 truncate" title={`初始 ¥${configuredInitialCash.toLocaleString("zh-CN")} - 在持净成本 ¥${deductedCashCost.toLocaleString("zh-CN")}`}>
+                扣减在持成本 ¥{deductedCashCost.toFixed(2)}
               </div>
             </div>
 
@@ -449,7 +449,7 @@ export function PortfolioView({
                 <div className="relative">
                   <input
                     type="number"
-                    step="0.5"
+                    step="0.1"
                     min="0.1"
                     value={grams}
                     onChange={(e) => setGrams(e.target.value)}
@@ -540,7 +540,13 @@ export function PortfolioView({
 
         {visibleOrders.length === 0 ? (
           <div className="empty-state py-10 text-center text-xs text-slate-400">
-            {onlyHolding ? "暂无在持批次" : "暂无历史订单"}
+            {ordersFailed
+              ? "订单流水读取失败，请点击刷新重试"
+              : !ordersLoaded
+                ? "正在读取历史订单…"
+                : onlyHolding
+                  ? "暂无在持批次"
+                  : "暂无历史订单"}
           </div>
         ) : (
           <div className="max-h-[480px] overflow-auto rounded-xl border border-white/[0.06] bg-[#101722]">
@@ -558,7 +564,7 @@ export function PortfolioView({
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
-                {visibleOrders.map(({ order: ord, lotStatus, remainingGrams, lotPnl }) => {
+                {visibleOrders.slice(0, orderDisplayLimit).map(({ order: ord, lotStatus, remainingGrams, lotPnl }) => {
                   const isOpen = lotStatus === "HOLDING" || lotStatus === "PARTIAL";
                   return (
                     <tr
@@ -604,6 +610,15 @@ export function PortfolioView({
                             卖出平仓
                           </span>
                         )}
+                        {lotStatus === "UNFILLED" && (
+                          <span className="data-label border-slate-500/30 bg-slate-500/10 text-slate-400">
+                            {ord.state === "REJECTED"
+                              ? "已拒绝"
+                              : ord.state === "CANCELED"
+                                ? "已撤销"
+                                : "未成交"}
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-2.5 font-semibold text-slate-200">
                         {(ord.filled_grams ?? ord.requested_grams).toFixed(4)} g
@@ -629,6 +644,7 @@ export function PortfolioView({
                         {(ord.bank_event_at ?? ord.received_at)
                           ? new Date((ord.bank_event_at ?? ord.received_at) as string).toLocaleString("zh-CN", {
                               hour12: false,
+                              timeZone: "Asia/Shanghai",
                             })
                           : "—"}
                       </td>
@@ -637,6 +653,17 @@ export function PortfolioView({
                 })}
               </tbody>
             </table>
+            {visibleOrders.length > orderDisplayLimit && (
+              <div className="mt-3 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setOrderDisplayLimit((prev) => prev + 50)}
+                  className="secondary-button px-4 py-1.5 text-xs"
+                >
+                  加载更多（已显示 {orderDisplayLimit} / {visibleOrders.length} 条）
+                </button>
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -680,7 +707,7 @@ export function PortfolioView({
                   <span className="font-mono text-slate-200">{rep.summary}</span>
                 </div>
                 <span className="font-mono text-[11px] text-slate-400">
-                  {new Date(rep.as_of).toLocaleString("zh-CN", { hour12: false })}
+                  {new Date(rep.as_of).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" })}
                 </span>
               </div>
             ))}

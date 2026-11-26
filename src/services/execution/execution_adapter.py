@@ -53,20 +53,29 @@ class ExecutionAdapter:
 
     def _persist_kill_switch(self) -> None:
         if self._state_store is not None:
-            risk_state, _ = self._state_store.load_control_state()
-            self._state_store.save_control_state(risk_state, self._kill_switch_active)
+            self._state_store.save_kill_switch_state(self._kill_switch_active)
 
     def trigger_kill_switch(self, reason: str = "MANUAL_EMERGENCY_HALT") -> None:
         """触发人工急停开关，强行阻断所有新报单。"""
         with self._lock:
+            prev = self._kill_switch_active
             self._kill_switch_active = True
-            self._persist_kill_switch()
+            try:
+                self._persist_kill_switch()
+            except Exception:
+                self._kill_switch_active = prev
+                raise
 
     def reset_kill_switch(self) -> None:
         """解除急停状态，恢复正常报单链路。"""
         with self._lock:
+            prev = self._kill_switch_active
             self._kill_switch_active = False
-            self._persist_kill_switch()
+            try:
+                self._persist_kill_switch()
+            except Exception:
+                self._kill_switch_active = prev
+                raise
 
     def is_kill_switch_active(self) -> bool:
         """检查急停开关当前是否激活。"""
@@ -213,7 +222,7 @@ class ExecutionAdapter:
     ) -> BatchOrderInstruction:
         """在非交易时段登记次开盘批量价挂单指令。"""
         with self._lock:
-            if self._kill_switch_active:
+            if self.is_kill_switch_active():
                 raise RuntimeError("系统已触发 Kill-Switch 熔断，拒绝登记批量挂单指令！")
             if not isfinite(grams) or grams <= 0:
                 raise ValueError("批量挂单克重必须为正且有限")
@@ -237,7 +246,11 @@ class ExecutionAdapter:
                 target_session_open=target_open,
             )
             self._batch_instructions[instruction_id] = inst
-            self._persist_batch_instructions()
+            try:
+                self._persist_batch_instructions()
+            except Exception:
+                self._batch_instructions.pop(instruction_id, None)
+                raise
             return inst.model_copy(deep=True)
 
     def execute_batch_at_open(
@@ -251,7 +264,7 @@ class ExecutionAdapter:
         卖单需 limit_price <= batch_price 才可成交。
         """
         with self._lock:
-            if self._kill_switch_active:
+            if self.is_kill_switch_active():
                 raise RuntimeError("系统已触发 Kill-Switch 熔断，拒绝执行批量挂单指令！")
             if not isfinite(bank_batch_price) or bank_batch_price <= 0:
                 raise ValueError("银行批量成交价必须为正且有限")

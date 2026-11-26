@@ -1,5 +1,5 @@
-import { Pause, Play, RefreshCw, ShieldAlert } from "lucide-react";
-import type { LiveStatusResponse } from "../api/types";
+import { Pause, Play, RefreshCw, ShieldAlert, UserRound } from "lucide-react";
+import type { JDAuthStatusResponse, LiveStatusResponse } from "../api/types";
 import { RISK_STYLE } from "../riskStatus";
 import { formatBeijingTime } from "../quotes";
 import { WorkspaceNav, type WorkspaceTab } from "./WorkspaceNav";
@@ -8,6 +8,7 @@ interface TopStatusBarProps {
   activeTab: WorkspaceTab;
   onChangeTab: (tab: WorkspaceTab) => void;
   liveStatus: LiveStatusResponse | null;
+  jdAuth: JDAuthStatusResponse | null;
   liveFailed: boolean;
   liveUpdatedAt?: string;
   autoRefresh: boolean;
@@ -21,7 +22,7 @@ interface TopStatusBarProps {
 }
 
 export function TopStatusBar({
-  activeTab, onChangeTab, liveStatus, liveFailed, liveUpdatedAt, autoRefresh, lastUpdated, refreshing,
+  activeTab, onChangeTab, liveStatus, jdAuth, liveFailed, liveUpdatedAt, autoRefresh, lastUpdated, refreshing,
   killBusy, newsFlags, onToggleAutoRefresh, onRefresh, onToggleKillSwitch,
 }: TopStatusBarProps) {
   const risk = liveStatus && RISK_STYLE[liveStatus.risk_state];
@@ -31,6 +32,14 @@ export function TopStatusBar({
     ? risk ? `上次已知状态 · ${risk.label}` : "风控状态未知"
     : risk?.label ?? (liveStatus ? "风控状态未知" : "风控读取中");
   const session = liveStatus && !liveFailed ? liveStatus.is_trading_session ? "交易时段内" : "休市" : null;
+  const jdLoggedIn = jdAuth?.logged_in ?? liveStatus?.jd_logged_in ?? false;
+  const jdReauth = jdAuth?.reauth_recommended === true;
+  const jdLabel = jdLoggedIn ? (jdReauth ? "京东即将到期" : "京东已登录") : "京东未登录";
+  const jdTone = jdLoggedIn
+    ? jdReauth
+      ? "text-amber-200"
+      : "text-emerald-300"
+    : "text-slate-300";
 
   return (
     <header className="workspace-header">
@@ -46,6 +55,15 @@ export function TopStatusBar({
             {killActive ? (
               <span className={liveFailed ? "text-slate-300" : "text-rose-200"}>{liveFailed ? "上次已知 · 急停已启用" : "急停已启用"}</span>
             ) : liveFailed ? <span>急停状态未知</span> : session && <span>{session}</span>}
+            <button
+              type="button"
+              onClick={() => onChangeTab("accounts")}
+              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-white/5 ${jdTone}`}
+              title="前往账号管理"
+            >
+              <UserRound className="size-3" aria-hidden="true" />
+              <span>{jdLabel}</span>
+            </button>
           </div>
 
           <div className="flex flex-wrap items-center gap-1 text-xs text-slate-300">

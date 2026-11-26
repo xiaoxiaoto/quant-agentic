@@ -1,5 +1,6 @@
 """模型状态查询与新闻大模型提取入口。"""
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import uuid4
@@ -42,6 +43,7 @@ def model_status(
             "framework": "pydantic-ai",
         },
         "news_sync": runtime.news_sync.status(),
+        "qlib": runtime.qlib_research.get_status().model_dump(mode="json"),
     }
 
 
@@ -52,13 +54,14 @@ def get_news_overview(
 ) -> NewsOverviewResponse:
     """查询消息面态势总览：结构化新闻事件、宏观日程及当前生效的新闻风控标志。"""
     now = datetime.now(UTC)
-    locked, reason = runtime.news.is_event_locked(now)
+    locked, reason, flags, news, macro = runtime.news.stored_overview(now, limit)
     return NewsOverviewResponse(
         event_locked=locked,
         lock_reason=reason,
-        active_risk_flags=runtime.news.get_active_risk_flags(now),
-        news_events=runtime.news.list_news_events(limit=limit),
-        macro_events=runtime.news.list_macro_events(),
+        active_risk_flags=flags,
+        news_events=news,
+        jd_articles=runtime.news_sync.list_articles(limit=limit),
+        macro_events=macro,
     )
 
 
@@ -112,7 +115,7 @@ async def extract_news(
     except NewsAgentError as exc:
         raise HTTPException(status_code=502, detail="新闻模型提取失败，未录入风险结果") from exc
     try:
-        flags = runtime.news.ingest_news(event)
+        flags = await asyncio.to_thread(runtime.news.ingest_news, event)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail="新闻标识已存在且内容冲突，请使用新标识") from exc
     return NewsExtractResponse(event=event, risk_flags=flags)
@@ -125,7 +128,17 @@ def run_training_pipeline(
 ) -> TrainingPipelineReport:
     """从 SQLite 历史行情自动生成 PIT 样本、执行 Walk-Forward 样本外验证并可选训练 LightGBM 产物。"""
     product_code = payload.product_code or runtime.settings.default_product_code
+    if not runtime.training_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="当前已有模型训练任务正在运行，请稍后重试")
     try:
+        export_path = (
+            str(runtime.resolve_export_path(payload.export_samples_path))
+            if payload.export_samples_path is not None
+            else None
+        )
+        model_dir = (
+            str(runtime.resolve_data_path(payload.output_model_dir)) if payload.output_model_dir is not None else None
+        )
         return runtime.training_pipeline.run_pipeline(
             product_code=product_code,
             reference_product_code=payload.reference_product_code,
@@ -134,9 +147,11 @@ def run_training_pipeline(
             n_splits=payload.n_splits,
             num_boost_round=payload.num_boost_round,
             confidence_level=payload.confidence_level,
-            export_samples_path=payload.export_samples_path,
-            output_model_dir=payload.output_model_dir,
+            export_samples_path=export_path,
+            output_model_dir=model_dir,
             exclude_synthetic=payload.exclude_synthetic,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
+    finally:
+        runtime.training_lock.release()

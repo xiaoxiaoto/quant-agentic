@@ -7,6 +7,7 @@
 
 import uuid
 from datetime import UTC, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from math import isfinite
 
 from src.contracts.domains.execution import RFQFillResult, RFQRequest
@@ -139,8 +140,8 @@ class RFQExecutionEngine:
             fee_rate = self._fee_rule.sell_fee_rate
 
         final_price = round(final_price, 4)
-        total_trade_amount = request.grams * final_price
-        fee_cny = round(total_trade_amount * fee_rate, 2)
+        total_trade_amount = Decimal(str(request.grams)) * Decimal(str(final_price))
+        fee_cny = float((total_trade_amount * Decimal(str(fee_rate))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
         return RFQFillResult(
             fill_id=fill_id,

@@ -1,6 +1,6 @@
 """回测、模拟交易、实盘辅助与提醒执行接口数据传输模型。"""
 
-from pydantic import AwareDatetime, BaseModel, Field, NonNegativeFloat, PositiveFloat, PositiveInt
+from pydantic import AwareDatetime, BaseModel, Field, NonNegativeFloat, PositiveFloat, PositiveInt, model_validator
 
 from src.contracts.domains.account import OrderEvent
 from src.contracts.domains.execution import BatchOrderInstruction, RFQFillResult
@@ -133,3 +133,10 @@ class AlertExecuteRequest(BaseModel):
     filled_price: PositiveFloat | None = Field(default=None, allow_inf_nan=False, description="实际成交单价（元/克）")
     fee: NonNegativeFloat | None = Field(default=None, allow_inf_nan=False, description="实际手续费（元）")
     bank_order_id: str | None = Field(default=None, description="银行官方订单号")
+
+    @model_validator(mode="after")
+    def _validate_fill_pair(self) -> "AlertExecuteRequest":
+        """成交克重与单价必须成对提供或同时省略，防止部分填写静默跳过记账。"""
+        if (self.filled_grams is None) != (self.filled_price is None):
+            raise ValueError("filled_grams 与 filled_price 必须同时提供或同时留空")
+        return self

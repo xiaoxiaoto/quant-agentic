@@ -1,6 +1,6 @@
-import { Activity, Compass, FlaskConical, Globe2, Maximize, Newspaper, Wallet } from "lucide-react";
+import { Activity, Compass, FlaskConical, Globe2, Maximize, Newspaper, UserRound, Wallet } from "lucide-react";
 
-export type WorkspaceTab = "overview" | "markets" | "news" | "portfolio" | "research";
+export type WorkspaceTab = "overview" | "markets" | "news" | "portfolio" | "research" | "accounts";
 
 const NAV_ITEMS = [
   { id: "overview", label: "总览", icon: Compass },
@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { id: "news", label: "资讯", icon: Newspaper },
   { id: "portfolio", label: "账本", icon: Wallet },
   { id: "research", label: "研究", icon: FlaskConical },
+  { id: "accounts", label: "账号", icon: UserRound },
 ] as const;
 
 interface WorkspaceNavProps {

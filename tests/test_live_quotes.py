@@ -206,7 +206,7 @@ def test_background_poll_recovers_without_restart(tmp_path: Path) -> None:
             try:
                 await asyncio.wait_for(completed.wait(), timeout=1)
                 # 等待存储完成，再读状态，避免把请求完成误当成采集完成。
-                async with runtime.live_quotes._lock:
+                async with runtime.live_quotes._product_locks["CMBC-JCJ"]:
                     assert runtime.live_quotes.status().records_saved == 1
                     assert runtime.live_quotes.status().failures == 1
             finally:

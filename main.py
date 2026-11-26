@@ -15,27 +15,18 @@ settings = Settings()
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    """随应用启停行情轮询和授权检查，并释放异步连接。"""
+    """随应用启停京东采集和授权检查，并释放异步连接。"""
     owned = application.state.runtime is None
     if owned:
         application.state.runtime = RuntimeDependencies(settings)
     runtime: RuntimeDependencies = application.state.runtime
     try:
-        await runtime.jd_gold.start()
-        await runtime.live_quotes.start()
-        await runtime.news_sync.start()
-        yield
+        async with runtime.background_collection():
+            yield
     finally:
         try:
-            try:
-                await runtime.news_sync.stop()
-            finally:
-                try:
-                    await runtime.live_quotes.stop()
-                finally:
-                    await runtime.jd_gold.stop()
-        finally:
             await runtime.close()
+        finally:
             if owned:
                 application.state.runtime = None
 

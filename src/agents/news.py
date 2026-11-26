@@ -34,11 +34,37 @@ class NewsRiskExtraction(BaseModel):
     summary: str = Field(min_length=1, max_length=2000)
 
 
+class _HttpxTransportAdapter(httpx2.AsyncBaseTransport):
+    """将 httpx 测试传输层适配为 httpx2 传输接口，避免触发 pydantic-ai 弃用告警。"""
+
+    def __init__(self, transport: httpx.AsyncBaseTransport) -> None:
+        self._transport = transport
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        """转发异步请求并将响应体读取后回传给 httpx2 客户端。"""
+        proxied = httpx.Request(
+            method=request.method,
+            url=str(request.url),
+            headers=list(request.headers.raw),
+            content=request.content,
+        )
+        response = await self._transport.handle_async_request(proxied)
+        body = await response.aread()
+        return httpx2.Response(
+            status_code=response.status_code,
+            headers=list(response.headers.raw),
+            content=body,
+        )
+
+
 class NewsAgent:
     """新闻分析与风险提取 Agent，调用真实模型并保留来源与发布时间。"""
 
     _prompt_template_name: str = "news_system_prompt"
     _system_prompt: str = PromptTemplateManager.get_prompt_template("news_system_prompt")
+    _MAX_TITLE_CHARS: int = 512
+    _MAX_CONTENT_CHARS: int = 8000
+    _MAX_SOURCE_CHARS: int = 256
 
     def __init__(
         self,
@@ -46,10 +72,10 @@ class NewsAgent:
         model: str,
         api_key: str,
         timeout_seconds: float = 30.0,
-        transport: httpx.AsyncBaseTransport | None = None,
+        transport: httpx.AsyncBaseTransport | httpx2.AsyncBaseTransport | None = None,
         system_prompt: str | None = None,
     ) -> None:
-        url = httpx.URL(base_url)
+        url = httpx2.URL(base_url)
         if (
             url.scheme not in ("http", "https")
             or not url.host
@@ -64,22 +90,18 @@ class NewsAgent:
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("新闻模型超时必须为正且有限")
         self._model = model
-        self._system_prompt = system_prompt or PromptTemplateManager.get_prompt_template(self._prompt_template_name)
-        # 生产路径使用 httpx2.AsyncClient 以兼容 pydantic-ai v3（移除了 httpx 支持）。
-        # 传入外部 transport（测试用 httpx.MockTransport）时回退到 httpx.AsyncClient。
-        if transport is not None:
-            self._client: httpx.AsyncClient | httpx2.AsyncClient = httpx.AsyncClient(
-                base_url=base_url.rstrip("/") + "/",
-                timeout=timeout_seconds,
-                transport=transport,
-                follow_redirects=False,
-            )
-        else:
-            self._client = httpx2.AsyncClient(
-                base_url=base_url.rstrip("/") + "/",
-                timeout=timeout_seconds,
-                follow_redirects=False,
-            )
+        self._system_prompt = system_prompt or type(self)._system_prompt
+        adapted_transport: httpx2.AsyncBaseTransport | None = None
+        if isinstance(transport, httpx2.AsyncBaseTransport):
+            adapted_transport = transport
+        elif transport is not None:
+            adapted_transport = _HttpxTransportAdapter(transport)
+        self._client = httpx2.AsyncClient(
+            base_url=base_url.rstrip("/") + "/",
+            timeout=timeout_seconds,
+            transport=adapted_transport,
+            follow_redirects=False,
+        )
 
         provider = OpenAIProvider(base_url=base_url, api_key=api_key, http_client=self._client)
         self._agent = Agent(
@@ -113,9 +135,9 @@ class NewsAgent:
         if event_id is not None and not event_id.strip():
             raise ValueError("新闻事件标识不能为空")
         news_data = {
-            "title": title,
-            "content": content,
-            "source": source,
+            "title": title[: self._MAX_TITLE_CHARS],
+            "content": content[: self._MAX_CONTENT_CHARS],
+            "source": source[: self._MAX_SOURCE_CHARS],
             "published_at": published_at.isoformat(),
         }
         try:
@@ -123,7 +145,7 @@ class NewsAgent:
             if run.response.finish_reason != "stop":
                 raise NewsAgentError("新闻模型输出未完整结束")
             result = run.output
-        except (AgentRunError, UserError, httpx.HTTPError, httpx2.HTTPError) as exc:
+        except (AgentRunError, UserError, TimeoutError, httpx.HTTPError, httpx2.HTTPError) as exc:
             logging.getLogger(__name__).warning("新闻模型调用失败：%s", type(exc).__name__)
             raise NewsAgentError("新闻模型调用或结构化校验失败，请检查服务与配置") from None
 

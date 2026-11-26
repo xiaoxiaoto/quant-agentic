@@ -4,15 +4,16 @@ import type { ModelStatusResponse, NewsOverviewResponse } from "../api/types";
 
 interface NewsViewProps {
   newsOverview: NewsOverviewResponse | null;
-  modelStatus: ModelStatusResponse | null;
-  busyAction: string | null;
-  onSyncNews: () => void;
+  syncStatus?: ModelStatusResponse["news_sync"];
+  busyAction?: string | null;
+  refreshing: boolean;
+  onRefresh: () => void;
   onRegisterMacro: (payload: {
     event_name: string;
     scheduled_at: string;
     lock_window_hours_before: number;
     lock_window_hours_after: number;
-  }) => Promise<void>;
+  }) => Promise<boolean>;
 }
 
 const TYPE_BADGE: Record<string, { label: string; cls: string }> = {
@@ -25,9 +26,10 @@ const TYPE_BADGE: Record<string, { label: string; cls: string }> = {
 
 export function NewsView({
   newsOverview,
-  modelStatus,
-  busyAction,
-  onSyncNews,
+  syncStatus,
+  busyAction = null,
+  refreshing,
+  onRefresh,
   onRegisterMacro,
 }: NewsViewProps) {
   const [typeFilter, setTypeFilter] = useState<string>("ALL");
@@ -38,6 +40,7 @@ export function NewsView({
   const [hoursBefore, setHoursBefore] = useState("2");
   const [hoursAfter, setHoursAfter] = useState("2");
   const [submittingMacro, setSubmittingMacro] = useState(false);
+  const [macroError, setMacroError] = useState<string | null>(null);
 
   const events = newsOverview?.news_events ?? [];
   const macros = newsOverview?.macro_events ?? [];
@@ -54,17 +57,44 @@ export function NewsView({
   const handleMacroSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!eventName.trim() || !scheduledAt) return;
+    setMacroError(null);
+    const hasTz = /(?:Z|[+-]\d{2}:\d{2})$/i.test(scheduledAt);
+    const normalized = hasTz
+      ? scheduledAt
+      : scheduledAt.length === 16
+        ? `${scheduledAt}:00+08:00`
+        : `${scheduledAt}+08:00`;
+    const parsedDate = new Date(normalized);
+    if (Number.isNaN(parsedDate.getTime())) {
+      setMacroError("请输入有效的日程时间");
+      return;
+    }
+    const parsedBefore = hoursBefore.trim() === "" ? 2 : Number(hoursBefore);
+    const parsedAfter = hoursAfter.trim() === "" ? 2 : Number(hoursAfter);
+    if (
+      !Number.isFinite(parsedBefore) ||
+      parsedBefore < 0 ||
+      parsedBefore > 72 ||
+      !Number.isFinite(parsedAfter) ||
+      parsedAfter < 0 ||
+      parsedAfter > 72
+    ) {
+      setMacroError("锁定窗口时长需在 0 至 72 小时之间");
+      return;
+    }
     setSubmittingMacro(true);
     try {
-      const iso = new Date(scheduledAt).toISOString();
-      await onRegisterMacro({
+      const iso = parsedDate.toISOString();
+      const ok = await onRegisterMacro({
         event_name: eventName.trim(),
         scheduled_at: iso,
-        lock_window_hours_before: Number(hoursBefore) || 2,
-        lock_window_hours_after: Number(hoursAfter) || 2,
+        lock_window_hours_before: parsedBefore,
+        lock_window_hours_after: parsedAfter,
       });
-      setEventName("");
-      setScheduledAt("");
+      if (ok) {
+        setEventName("");
+        setScheduledAt("");
+      }
     } finally {
       setSubmittingMacro(false);
     }
@@ -106,13 +136,40 @@ export function NewsView({
 
         <button
           type="button"
-          onClick={onSyncNews}
-          disabled={busyAction !== null || !modelStatus?.news_llm?.enabled}
+          onClick={onRefresh}
+          disabled={refreshing}
           className="secondary-button"
         >
-          <RefreshCw className={`size-3.5 ${busyAction === "news-sync" ? "animate-spin" : ""}`} />
-          {busyAction === "news-sync" ? "正在同步…" : "同步黄金资讯"}
+          <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
+          {refreshing ? "读取中…" : "刷新资讯"}
         </button>
+      </section>
+
+      <section className="surface p-4 sm:p-6">
+        <h2 className="section-heading">京东资讯原文</h2>
+        {syncStatus?.errors?.flash && <p className="mt-2 text-xs text-amber-200">快讯采集暂不可用</p>}
+        {syncStatus?.errors?.news && <p className="mt-2 text-xs text-amber-200">黄金资讯采集暂不可用</p>}
+        {syncStatus?.errors?.morning && <p className="mt-2 text-xs text-amber-200">
+          {syncStatus.errors.morning === "AUTH_REQUIRED" ? "早报采集等待京东授权" : "早报采集暂不可用"}
+        </p>}
+        {newsOverview?.jd_articles?.length ? (
+          <div className="mt-3 space-y-2">
+            {newsOverview.jd_articles.map((article) => (
+              <details key={article.article_id} className="rounded-lg border border-white/10 p-3">
+                <summary>
+                  <span className="mr-2 text-xs text-slate-400">
+                    {{ news: "资讯", flash: "快讯", morning: "早报" }[article.channel]}
+                  </span>
+                  {article.title}
+                </summary>
+                <time className="mt-2 block text-xs text-slate-400" dateTime={article.published_at}>
+                  {new Date(article.published_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })} · {article.source}
+                </time>
+                <p className="mt-2 whitespace-pre-wrap text-sm">{article.content}</p>
+              </details>
+            ))}
+          </div>
+        ) : <p className="mt-2 text-sm text-slate-400">暂无已采集的京东资讯</p>}
       </section>
 
       {activeFlags.length > 0 && (
@@ -199,7 +256,10 @@ export function NewsView({
                         <span className="font-mono text-[11px] text-slate-400">{ev.source}</span>
                       </div>
                       <span className="font-mono text-[11px] text-slate-400">
-                        {new Date(ev.published_at).toLocaleString("zh-CN", { hour12: false })}
+                        {new Date(ev.published_at).toLocaleString("zh-CN", {
+                          hour12: false,
+                          timeZone: "Asia/Shanghai",
+                        })}
                       </span>
                     </div>
 
@@ -280,6 +340,7 @@ export function NewsView({
                     type="number"
                     step="0.5"
                     min="0"
+                    max="72"
                     value={hoursBefore}
                     onChange={(e) => setHoursBefore(e.target.value)}
                     className="mt-1 w-full field px-3 py-1.5 text-slate-100"
@@ -291,6 +352,7 @@ export function NewsView({
                     type="number"
                     step="0.5"
                     min="0"
+                    max="72"
                     value={hoursAfter}
                     onChange={(e) => setHoursAfter(e.target.value)}
                     className="mt-1 w-full field px-3 py-1.5 text-slate-100"
@@ -298,9 +360,11 @@ export function NewsView({
                 </label>
               </div>
 
+              {macroError && <p className="text-xs text-rose-400">{macroError}</p>}
+
               <button
                 type="submit"
-                disabled={submittingMacro}
+                disabled={submittingMacro || busyAction !== null}
                 className="primary-button mt-2 w-full"
               >
                 <Plus className="size-3.5" />
@@ -322,7 +386,7 @@ export function NewsView({
                   >
                     <div className="font-semibold text-slate-200">{m.event_name}</div>
                     <div className="mt-1 flex items-center justify-between text-[11px] text-slate-400">
-                      <span>{new Date(m.scheduled_at).toLocaleString("zh-CN", { hour12: false })}</span>
+                      <span>{new Date(m.scheduled_at).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" })}</span>
                       <span className="data-label border-cyan-500/30 bg-cyan-500/10 text-cyan-300 text-[10px]">
                         -{m.lock_window_hours_before}h / +{m.lock_window_hours_after}h
                       </span>

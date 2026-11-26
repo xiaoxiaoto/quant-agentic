@@ -5,8 +5,9 @@
 """
 
 import json
-from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta, timezone
+from math import isfinite
 from threading import RLock
 
 from pydantic import JsonValue
@@ -27,6 +28,7 @@ from src.contracts.enums.trading import (
     RiskState,
     TradeDirection,
 )
+from src.repositories.database import SQLiteDatabase
 from src.repositories.quote import QuoteRepository
 from src.repositories.runtime_state import RuntimeStateRepository
 from src.services.decision.decision_engine import DecisionEngine
@@ -97,8 +99,49 @@ class LiveTradingService:
             self._last_reconciliation = self._state_store.load_latest_reconciliation_report()
             self._last_signal_at = self._state_store.load_last_signal_at()
 
+    def _apply_ledger_reset(
+        self,
+        *,
+        effective_cash: float,
+        jd_orders: list[OrderEvent],
+        total_g: float | None,
+        holdings: list[tuple[str, float, float]],
+    ) -> AccountSnapshot:
+        """在服务锁保护下重置本地影子账本，供异步入口卸载至工作线程执行。"""
+        with self._lock:
+            if jd_orders:
+                return self._ledger.reset_and_replay_orders(
+                    initial_cash=effective_cash,
+                    orders=jd_orders,
+                    target_gold_g=total_g,
+                )
+            return self._ledger.reset_and_seed_holdings(initial_cash=effective_cash, holdings=holdings)
+
+    def _reconcile_jd_holdings_sync(
+        self,
+        *,
+        bank_cash: float | None,
+        bank_gold_g: float,
+        bank_cost_basis: float | None,
+        as_of: datetime | None,
+    ) -> tuple[ReconciliationReport, RiskState]:
+        """在工作线程中执行本地快照读取与对账写库，避免阻塞异步事件循环。"""
+        local_snapshot = self._ledger.take_snapshot(as_of)
+        effective_cash = local_snapshot.cash_available if bank_cash is None else bank_cash
+        return self.reconcile_snapshot(
+            bank_cash=effective_cash,
+            bank_gold_g=bank_gold_g,
+            bank_cost_basis=bank_cost_basis,
+            as_of=as_of,
+        )
+
     def _now(self) -> datetime:
         return datetime.now(UTC)
+
+    @staticmethod
+    def _to_utc(dt: datetime) -> datetime:
+        """统一转换为 UTC aware 时间，避免跨时区或 naive 时间比较报错。"""
+        return dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
     def _persist_control(self) -> None:
         if self._state_store is not None:
@@ -117,6 +160,8 @@ class LiveTradingService:
             try:
                 value = float(str(raw))
             except ValueError:
+                continue
+            if not isfinite(value):
                 continue
             return value
         return None
@@ -177,10 +222,11 @@ class LiveTradingService:
         half = self._live_reference_spread_pct / 2.0
         bid_price = round(reference.price * (1.0 - half), 4)
         ask_price = round(reference.price * (1.0 + half), 4)
-        source_time = reference.quote_at or reference.received_at
-        effective_received = reference.received_at
-        source_time = min(source_time, as_of)
-        effective_received = min(effective_received, as_of)
+        as_of_utc = self._to_utc(as_of)
+        source_time = self._to_utc(reference.quote_at or reference.received_at)
+        effective_received = self._to_utc(reference.received_at)
+        source_time = min(source_time, as_of_utc)
+        effective_received = min(effective_received, as_of_utc)
         return QuoteRaw(
             quote_id=f"ref_assist_{reference.product_code}_{reference.quote_id}",
             source_id=f"REF_ASSIST_{reference.product_code}",
@@ -204,12 +250,15 @@ class LiveTradingService:
         product_code: str,
         as_of: datetime,
     ) -> list[QuoteRaw]:
-        """从已持久化的参考行情表按 PIT 边界构造辅助评估历史序列。"""
+        """从已持久化的参考行情表按 PIT 边界构造有界辅助评估历史序列。"""
+        as_of_utc = self._to_utc(as_of)
         lookback_hours = max(720, self._timesfm_context_length + 1)
+        max_points = max(2000, self._timesfm_context_length * 4)
         refs = self._live_quotes.query_series(
             reference_product_code,
-            start_time=current_quote.quote_at - timedelta(hours=lookback_hours),
-            end_time=as_of,
+            start_time=self._to_utc(current_quote.quote_at) - timedelta(hours=lookback_hours),
+            end_time=as_of_utc,
+            limit=max_points,
         )
         history: list[QuoteRaw] = []
         for item in refs:
@@ -217,10 +266,10 @@ class LiveTradingService:
                 continue
             if item.quality_state in (DataQualityState.ANOMALY, DataQualityState.STALE):
                 continue
-            visible_at = item.available_at or item.received_at
-            if visible_at > as_of:
+            visible_at = self._to_utc(item.available_at or item.received_at)
+            if visible_at > as_of_utc:
                 continue
-            mapped = self._build_reference_estimated_quote(item, product_code=product_code, as_of=as_of)
+            mapped = self._build_reference_estimated_quote(item, product_code=product_code, as_of=as_of_utc)
             if mapped.quote_id != current_quote.quote_id:
                 history.append(mapped)
         history.append(current_quote)
@@ -236,8 +285,8 @@ class LiveTradingService:
             return None
         if ref.quality_state == DataQualityState.ANOMALY:
             return None
-        visible_at = ref.available_at or ref.received_at
-        if visible_at > as_of:
+        visible_at = self._to_utc(ref.available_at or ref.received_at)
+        if visible_at > self._to_utc(as_of):
             return None
         return ref.price
 
@@ -255,15 +304,14 @@ class LiveTradingService:
         filtered.append(quote)
         return filtered
 
-    @classmethod
-    def _parse_jd_gold_orders(cls, payload: JsonValue) -> list[OrderEvent]:
-        """解析京东历史订单响应，提取已成交的黄金买卖流水（过滤非黄金及失败/退款单）。"""
+    @staticmethod
+    def _unwrap_jd_order_list(payload: JsonValue) -> Sequence[object]:
+        """解包京东订单响应多层信封，返回原始订单条目列表。"""
         body: object = payload.get("resultData", payload) if isinstance(payload, dict) else payload
         if isinstance(body, dict) and "datas" in body:
             body = body["datas"]
         if isinstance(body, dict) and "data" in body:
             body = body["data"]
-
         raw_list = (
             body
             if isinstance(body, list)
@@ -273,7 +321,37 @@ class LiveTradingService:
                 else None
             )
         )
-        if not isinstance(raw_list, list):
+        return raw_list if isinstance(raw_list, list) else ()
+
+    @staticmethod
+    def _parse_jd_biz_time(raw: object) -> datetime | None:
+        """解析京东订单 bizTime（支持数值/字符串毫秒时间戳、ISO-8601 与北京时间格式）。"""
+        if isinstance(raw, (int, float)) and raw > 0:
+            ts_sec = float(raw) / 1000.0 if raw > 1e11 else float(raw)
+            return datetime.fromtimestamp(ts_sec, tz=UTC)
+        if isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return None
+            if text.isdigit():
+                num = float(text)
+                if num > 0:
+                    ts_sec = num / 1000.0 if num > 1e11 else num
+                    return datetime.fromtimestamp(ts_sec, tz=UTC)
+            try:
+                parsed = datetime.fromisoformat(text)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+                return parsed.astimezone(UTC)
+            except ValueError:
+                return None
+        return None
+
+    @classmethod
+    def _parse_jd_gold_orders(cls, payload: JsonValue) -> list[OrderEvent]:
+        """解析京东历史订单响应，提取已成交的黄金买卖流水（过滤非黄金及失败/退款单）。"""
+        raw_list = cls._unwrap_jd_order_list(payload)
+        if not raw_list:
             return []
 
         parsed: list[OrderEvent] = []
@@ -328,10 +406,7 @@ class LiveTradingService:
                 fee = 0.0
 
             biz_time_raw = item.get("bizTime")
-            dt = datetime.now(UTC)
-            if isinstance(biz_time_raw, (int, float)) and biz_time_raw > 0:
-                ts_sec = float(biz_time_raw) / 1000.0 if biz_time_raw > 1e11 else float(biz_time_raw)
-                dt = datetime.fromtimestamp(ts_sec, tz=UTC)
+            dt = cls._parse_jd_biz_time(biz_time_raw) or datetime.now(UTC)
 
             order_id = str(item.get("orderId") or item.get("bizOrderId") or "").strip()
             if not order_id:
@@ -358,7 +433,7 @@ class LiveTradingService:
 
     async def _fetch_all_jd_gold_orders(self, *, max_pages: int = 20, page_size: int = 200) -> list[OrderEvent]:
         """分页拉取京东账户全量历史黄金成交流水并按订单号去重。"""
-        end_date = self._now().strftime("%Y-%m-%d")
+        end_date = self._now().astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
         start_date = "2020-01-01"
         by_id: dict[str, OrderEvent] = {}
         for page_no in range(1, max_pages + 1):
@@ -368,11 +443,7 @@ class LiveTradingService:
                 page_no=page_no,
                 page_size=page_size,
             )
-            raw_count = 0
-            if isinstance(payload, dict):
-                raw_vo = payload.get("tradeOrderVoList") or payload.get("list") or []
-                if isinstance(raw_vo, list):
-                    raw_count = len(raw_vo)
+            raw_count = len(self._unwrap_jd_order_list(payload))
             for order in self._parse_jd_gold_orders(payload):
                 by_id[order.client_order_id] = order
             if raw_count < page_size:
@@ -430,7 +501,7 @@ class LiveTradingService:
                 and ref_quote.unit == "CNY/g"
                 and ref_quote.price > 0
                 and ref_quote.quality_state in (DataQualityState.NORMAL, DataQualityState.GAP)
-                and (ref_quote.available_at or ref_quote.received_at) <= now
+                and self._to_utc(ref_quote.available_at or ref_quote.received_at) <= self._to_utc(now)
             ):
                 target_quote = self._build_reference_estimated_quote(
                     ref_quote,
@@ -504,9 +575,15 @@ class LiveTradingService:
 
         alert: AlertPayload | None = None
         with self._lock:
-            # 写入提醒前在同一临界区重新检查急停、对账熔断与信号冷却状态，防止并发竞态
+            # 写入提醒前在同一临界区重新检查急停、对账熔断、账本快照与信号冷却状态，防止并发竞态
             live_kill_active = self._execution.is_kill_switch_active()
             live_risk_state = self._risk_state
+            live_snap = self._ledger.take_snapshot(now)
+            ledger_changed = (
+                live_snap.cash_available != snap.cash_available
+                or live_snap.gold_total_g != snap.gold_total_g
+                or live_snap.gold_available_g != snap.gold_available_g
+            )
             if live_kill_active or live_risk_state == RiskState.HALT_RECONCILE:
                 kill_active = live_kill_active
                 next_risk_state = live_risk_state
@@ -515,11 +592,19 @@ class LiveTradingService:
                 if live_risk_state == RiskState.HALT_RECONCILE and "HALT_RECONCILE_ACTIVE" not in violations:
                     violations.append("HALT_RECONCILE_ACTIVE")
                 approved_dec = approved_dec.model_copy(
-                    update={"action": DecisionAction.HOLD, "delta_g": 0.0, "target_inventory_g": snap.gold_total_g}
+                    update={"action": DecisionAction.HOLD, "delta_g": 0.0, "target_inventory_g": live_snap.gold_total_g}
                 )
-            elif approved_dec.action in (DecisionAction.BUY, DecisionAction.SELL) and self._decision.is_in_cooldown(
-                now, self._last_signal_at
-            ):
+            elif ledger_changed and approved_dec.action in (DecisionAction.BUY, DecisionAction.SELL):
+                if "LEDGER_STATE_CHANGED" not in violations:
+                    violations.append("LEDGER_STATE_CHANGED")
+                approved_dec = approved_dec.model_copy(
+                    update={
+                        "action": DecisionAction.ABSTAIN,
+                        "delta_g": 0.0,
+                        "target_inventory_g": live_snap.gold_total_g,
+                    }
+                )
+            elif approved_dec.action == DecisionAction.BUY and self._decision.is_in_cooldown(now, self._last_signal_at):
                 if "COOLDOWN_ACTIVE" not in approved_dec.risk_flags:
                     approved_dec.risk_flags.append("COOLDOWN_ACTIVE")
                 if "SIGNAL_COOLDOWN_ACTIVE" not in approved_dec.reason_codes:
@@ -626,9 +711,10 @@ class LiveTradingService:
 
             if alert.state not in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED):
                 raise ValueError(f"当前提醒状态不可标记为已执行：{alert.state.value}")
-            if self._alerts.is_expired(alert):
+            now_dt = self._now()
+            if self._alerts.is_expired(alert, now_dt):
                 # 交由提醒服务将其持久化为 EXPIRED 并抛出标准过期异常
-                return self._alerts.mark_executed(alert_id)
+                return self._alerts.mark_executed(alert_id, current_time=now_dt)
 
             if has_fill:
                 assert filled_grams is not None
@@ -651,7 +737,14 @@ class LiveTradingService:
                         bank_order_id=bank_order_id,
                     )
 
-            return self._alerts.mark_executed(alert_id)
+            try:
+                return self._alerts.mark_executed(alert_id, current_time=now_dt)
+            except Exception:
+                if has_fill:
+                    self._risk_state = RiskState.HALT_RECONCILE
+                    self._execution.trigger_kill_switch("ALERT_PERSIST_INCONSISTENCY")
+                    self._persist_control()
+                raise
 
     async def fetch_jd_holdings(self) -> JsonValue:
         """查询京东实盘账户黄金持仓明细。"""
@@ -712,13 +805,13 @@ class LiveTradingService:
         except JDGoldError:
             jd_orders = []
 
-        if jd_orders:
-            return self._ledger.reset_and_replay_orders(
-                initial_cash=effective_cash,
-                orders=jd_orders,
-                target_gold_g=total_g,
-            )
-        return self._ledger.reset_and_seed_holdings(initial_cash=effective_cash, holdings=holdings)
+        return await SQLiteDatabase.run_shielded_write(
+            self._apply_ledger_reset,
+            effective_cash=effective_cash,
+            jd_orders=jd_orders,
+            total_g=total_g,
+            holdings=holdings,
+        )
 
     async def fetch_jd_orders(
         self,
@@ -781,15 +874,15 @@ class LiveTradingService:
         as_of: datetime | None = None,
     ) -> tuple[ReconciliationReport, RiskState]:
         """核对本地影子账本与银行权威快照，发现差异时自动熔断并触发 Kill-Switch。"""
-        local_snapshot = self._ledger.take_snapshot(as_of)
-        report, recommended_risk = self._reconciliation.reconcile_snapshot(
-            local_snapshot=local_snapshot,
-            bank_cash=bank_cash,
-            bank_gold_g=bank_gold_g,
-            bank_cost_basis=bank_cost_basis,
-            as_of=as_of,
-        )
         with self._lock:
+            local_snapshot = self._ledger.take_snapshot(as_of)
+            report, recommended_risk = self._reconciliation.reconcile_snapshot(
+                local_snapshot=local_snapshot,
+                bank_cash=bank_cash,
+                bank_gold_g=bank_gold_g,
+                bank_cost_basis=bank_cost_basis,
+                as_of=as_of,
+            )
             self._last_reconciliation = report
             if self._state_store is not None:
                 self._state_store.save_reconciliation_report(report)
@@ -808,10 +901,9 @@ class LiveTradingService:
         """拉取京东实盘持仓并自动映射到影子账本快照对账，差异时自动熔断。"""
         payload = await self.fetch_jd_holdings()
         bank_gold_g, bank_cost_basis = self._extract_jd_holdings_totals(payload)
-        local_snapshot = self._ledger.take_snapshot(as_of)
-        effective_cash = local_snapshot.cash_available if bank_cash is None else bank_cash
-        return self.reconcile_snapshot(
-            bank_cash=effective_cash,
+        return await SQLiteDatabase.run_shielded_write(
+            self._reconcile_jd_holdings_sync,
+            bank_cash=bank_cash,
             bank_gold_g=bank_gold_g,
             bank_cost_basis=bank_cost_basis,
             as_of=as_of,
@@ -828,12 +920,13 @@ class LiveTradingService:
         self,
         *,
         bank_statements: list[BankStatementItem],
+        local_orders: list[OrderEvent] | None = None,
         as_of: datetime | None = None,
     ) -> tuple[ReconciliationReport, RiskState]:
         """逐笔核对本地影子账本订单流水与银行权威交易流水，差异时自动熔断。"""
-        local_orders = self._ledger.get_order_history()
+        effective_orders = self._ledger.get_order_history() if local_orders is None else local_orders
         report, recommended_risk = self._reconciliation.reconcile_orders(
-            local_orders=local_orders,
+            local_orders=effective_orders,
             bank_statements=bank_statements,
             as_of=as_of,
         )
@@ -899,6 +992,10 @@ class LiveTradingService:
         auth_state = self._jd_gold.auth_state()
         alerts = self._alerts.list_alerts(limit=100)
         pending_alerts = sum(1 for item in alerts if item.state in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED))
+        token_present = bool(auth_state.access_token.get_secret_value())
+        token_valid = token_present and (
+            auth_state.actual_expires_at is None or auth_state.actual_expires_at > now.timestamp()
+        )
         return {
             "risk_state": risk_state.value,
             "kill_switch_active": self._execution.is_kill_switch_active(),
@@ -909,7 +1006,7 @@ class LiveTradingService:
             "is_trading_session": self._calendar.is_trading_time(now),
             "total_alerts": len(alerts),
             "pending_alerts": pending_alerts,
-            "jd_logged_in": bool(auth_state.access_token.get_secret_value()),
+            "jd_logged_in": token_valid,
             "last_reconciliation": last_recon.model_dump(mode="json") if last_recon is not None else None,
             "snapshot": self._ledger.take_snapshot(now).model_dump(mode="json"),
         }

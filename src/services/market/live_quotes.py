@@ -16,6 +16,9 @@ from src.clients.fx_rate import FXRateClient
 from src.clients.jd_gold import JDGoldClient, JDGoldError
 from src.contracts.domains.reference_quote import LiveQuoteStatus, ReferenceProductCatalog, ReferenceQuote
 from src.contracts.enums.trading import DataQualityState
+from src.contracts.exceptions import StorageError
+from src.repositories.database import SQLiteDatabase
+from src.repositories.jd_collection import JDCollectionRepository
 from src.repositories.reference_quote import ReferenceQuoteRepository
 
 
@@ -51,15 +54,18 @@ class LiveQuoteCollector:
         product_codes: tuple[str, ...] | None = None,
         on_quote_saved: Callable[[ReferenceQuote], None] | None = None,
         fx_client: FXRateClient | None = None,
+        fx_repository: JDCollectionRepository | None = None,
     ) -> None:
         self._repository = repository
         self._on_quote_saved = on_quote_saved
         self._fx_client = fx_client
+        self._fx_repository = fx_repository
+        self._fx_lock = asyncio.Lock()
+        self._fx_saved_at: datetime | None = None
         self._enabled = enabled
         self._interval = interval_seconds
         self._stale_seconds = stale_seconds
         self._task: asyncio.Task[None] | None = None
-        self._lock = asyncio.Lock()
         self._product_locks: dict[str, asyncio.Lock] = {
             product.code: asyncio.Lock() for product in ReferenceProductCatalog.all()
         }
@@ -215,26 +221,26 @@ class LiveQuoteCollector:
             return self._parse_market(await self.client.stock_quote(code), code)
         return self._parse_market(await self.client.query_price(code), code)
 
-    async def _collect_product(self, code: str) -> LiveQuoteStatus:
+    async def _collect_product(self, code: str, fx: float | None = None) -> LiveQuoteStatus:
         try:
-            await self.collect_once(code)
-        except (JDGoldError, ValueError, OSError):
+            await self._collect_quote(code)
+        except (JDGoldError, ValueError, OSError, StorageError):
             pass
-        return self.status(code)
+        quote = self._latest.get(code)
+        return self._status(code, quote, fx if quote and quote.unit == "USD/oz" else None)
 
     async def _save(self, quote: ReferenceQuote, state: LiveQuoteStatus) -> None:
         # 取消协程不能停止写盘线程，必须等写入及内存提交结束才释放锁。
-        writing = asyncio.create_task(asyncio.to_thread(self._repository.save, quote))
         cancelled = False
-        while not writing.done():
-            try:
-                await asyncio.shield(writing)
-            except asyncio.CancelledError:
-                cancelled = True
-        writing.result()
+        try:
+            await SQLiteDatabase.run_shielded_write(self._repository.save, quote)
+        except asyncio.CancelledError:
+            cancelled = True
         if self._on_quote_saved is not None:
             try:
-                await asyncio.to_thread(self._on_quote_saved, quote)
+                await SQLiteDatabase.run_shielded_write(self._on_quote_saved, quote)
+            except asyncio.CancelledError:
+                cancelled = True
             except Exception:
                 logging.getLogger(__name__).exception("参考行情桥接回调执行失败：%s", quote.product_code)
         self._latest[quote.product_code] = quote
@@ -244,7 +250,21 @@ class LiveQuoteCollector:
         if cancelled:
             raise asyncio.CancelledError
 
-    def _compute_cny_per_g(self, latest: ReferenceQuote | None) -> tuple[float | None, float | None]:
+    def _read_fx_rate(self) -> float | None:
+        if self._fx_repository is not None:
+            row = self._fx_repository.latest_snapshot("fx:USD/CNY")
+            if row is None:
+                return None
+            value, _collected_at, checked_at = row
+            checked_utc = (
+                checked_at.astimezone(UTC) if checked_at.tzinfo is not None else checked_at.replace(tzinfo=UTC)
+            )
+            if (datetime.now(UTC) - checked_utc).total_seconds() > 86400.0:
+                return None
+            return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        return self._fx_client.cached_usd_cny() if self._fx_client is not None else None
+
+    def _compute_cny_per_g(self, latest: ReferenceQuote | None, fx: float | None) -> tuple[float | None, float | None]:
         """将原始参考价按单位与实时汇率换算为展示用 CNY/g，不改写原始报价。"""
         if latest is None:
             return None, None
@@ -253,7 +273,6 @@ class LiveQuoteCollector:
         if latest.unit == "CNY/kg":
             return round(latest.price / 1000.0, 4), None
         if latest.unit == "USD/oz":
-            fx = self._fx_client.cached_usd_cny() if self._fx_client is not None else None
             if fx is None:
                 return None, None
             return round(latest.price * fx / self._GRAMS_PER_TROY_OUNCE, 2), round(fx, 6)
@@ -263,14 +282,30 @@ class LiveQuoteCollector:
         if self._fx_client is None:
             return
         if any(ReferenceProductCatalog.get(code).unit == "USD/oz" for code in product_codes):
-            await self._fx_client.get_usd_cny()
+            async with self._fx_lock:
+                rate = await self._fx_client.get_usd_cny()
+                observed_at = self._fx_client.observed_at
+                if self._fx_repository is not None and observed_at is not None and observed_at != self._fx_saved_at:
+                    await SQLiteDatabase.run_shielded_write(
+                        self._fx_repository.save_snapshot, "fx:USD/CNY", rate, observed_at
+                    )
+                    self._fx_saved_at = observed_at
 
-    async def collect_once(self, product_code: str = "CMBC-JCJ") -> ReferenceQuote:
-        """拉取指定品种；失败保留原记录，重复源记录不重复落盘。"""
-        ReferenceProductCatalog.get(product_code)
-        if not self._enabled:
-            raise RuntimeError("实时行情采集未启用")
-        await self._refresh_fx_if_needed((product_code,))
+    def _status(self, product_code: str, quote: ReferenceQuote | None, fx: float | None) -> LiveQuoteStatus:
+        latest = self._classify(quote, datetime.now(UTC)) if quote is not None else None
+        cny_per_g, fx_rate = self._compute_cny_per_g(latest, fx)
+        state = self._states[product_code]
+        return state.model_copy(
+            update={
+                "running": self._task is not None and not self._task.done() and product_code in self._product_codes,
+                "latest": latest,
+                "last_success_at": state.last_success_at or (latest.received_at if latest else None),
+                "cny_per_g": cny_per_g,
+                "fx_rate_usd_cny": fx_rate,
+            }
+        )
+
+    async def _collect_quote(self, product_code: str) -> ReferenceQuote:
         # 同品种串行拉取与状态更新，避免并发乱序误报时间倒退；不同品种仍通过信号量并发。
         async with self._product_locks[product_code]:
             state = self._states[product_code]
@@ -278,25 +313,24 @@ class LiveQuoteCollector:
             try:
                 async with self._semaphore:
                     quote = await self._fetch(product_code)
-                async with self._lock:
-                    previous = self._latest.get(product_code)
-                    if previous is not None:
-                        if quote.quote_id == previous.quote_id:
-                            if quote.price != previous.price or quote.quote_at != previous.quote_at:
-                                raise ValueError("同一报价标识返回冲突内容")
-                            state.last_success_at = datetime.now(UTC)
-                            state.last_error = None
-                            return self.latest(product_code) or previous
-                        if (
-                            previous.quote_at is not None
-                            and quote.quote_at is not None
-                            and DataQualityState.ANOMALY not in (previous.quality_state, quote.quality_state)
-                            and quote.quote_at < previous.quote_at
-                        ):
-                            raise ValueError("参考行情源时间倒退")
-                    await self._save(quote, state)
-                    return quote
-            except (JDGoldError, ValueError, OSError) as exc:
+                previous = self._latest.get(product_code)
+                if previous is not None:
+                    if quote.quote_id == previous.quote_id:
+                        if quote.price != previous.price or quote.quote_at != previous.quote_at:
+                            raise ValueError("同一报价标识返回冲突内容")
+                        state.last_success_at = datetime.now(UTC)
+                        state.last_error = None
+                        return self._classify(previous, datetime.now(UTC))
+                    if (
+                        previous.quote_at is not None
+                        and quote.quote_at is not None
+                        and DataQualityState.ANOMALY not in (previous.quality_state, quote.quality_state)
+                        and quote.quote_at < previous.quote_at
+                    ):
+                        raise ValueError("参考行情源时间倒退")
+                await self._save(quote, state)
+                return quote
+            except (JDGoldError, ValueError, OSError, StorageError) as exc:
                 state.failures += 1
                 state.last_error = (
                     str(exc)
@@ -305,10 +339,18 @@ class LiveQuoteCollector:
                 )
                 raise
 
+    async def collect_once(self, product_code: str = "CMBC-JCJ") -> ReferenceQuote:
+        """拉取指定品种；失败保留原记录，重复源记录不重复落盘。"""
+        ReferenceProductCatalog.get(product_code)
+        if not self._enabled:
+            raise RuntimeError("实时行情采集未启用")
+        await self._refresh_fx_if_needed((product_code,))
+        return await self._collect_quote(product_code)
+
     def latest(self, product_code: str = "CMBC-JCJ") -> ReferenceQuote | None:
         """按读取时刻重算指定品种的时效，缺少源时间始终标记缺口。"""
         ReferenceProductCatalog.get(product_code)
-        quote = self._latest.get(product_code)
+        quote = self._repository.latest(product_code)
         return self._classify(quote, datetime.now(UTC)) if quote is not None else None
 
     def query_series(
@@ -317,6 +359,7 @@ class LiveQuoteCollector:
         *,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
+        limit: int | None = 500,
     ) -> list[ReferenceQuote]:
         """按产品与时间区间查询已持久化的参考行情序列。"""
         ReferenceProductCatalog.get(product_code)
@@ -324,21 +367,21 @@ class LiveQuoteCollector:
             product_code,
             start_time=start_time,
             end_time=end_time,
+            limit=limit,
         )
 
     def status(self, product_code: str = "CMBC-JCJ") -> LiveQuoteStatus:
-        """返回指定品种的独立采集状态，不包含鉴权配置。"""
+        """查询已落库参考价及采集状态。"""
         ReferenceProductCatalog.get(product_code)
-        latest = self.latest(product_code)
-        cny_per_g, fx_rate = self._compute_cny_per_g(latest)
-        return self._states[product_code].model_copy(
-            update={
-                "running": self._task is not None and not self._task.done() and product_code in self._product_codes,
-                "latest": latest,
-                "cny_per_g": cny_per_g,
-                "fx_rate_usd_cny": fx_rate,
-            }
-        )
+        quote = self._repository.latest(product_code)
+        return self._status(product_code, quote, self._read_fx_rate() if quote and quote.unit == "USD/oz" else None)
+
+    def statuses(self) -> list[LiveQuoteStatus]:
+        """批量读取 SQLite 中各品种的最新参考价。"""
+        codes = tuple(self._states)
+        quotes = self._repository.latest_all(target_products=codes)
+        fx = self._read_fx_rate()
+        return [self._status(code, quotes.get(code), fx) for code in codes]
 
     async def collect_all(self, product_codes: tuple[str, ...] | None = None) -> list[LiveQuoteStatus]:
         """有界并发采集，单个品种失败不会中断其他品种。"""
@@ -349,7 +392,14 @@ class LiveQuoteCollector:
         for code in codes:
             ReferenceProductCatalog.get(code)
         await self._refresh_fx_if_needed(codes)
-        return list(await asyncio.gather(*(self._collect_product(code) for code in codes)))
+        needs_fx = any(ReferenceProductCatalog.get(code).unit == "USD/oz" for code in codes)
+        fx = await asyncio.to_thread(self._read_fx_rate) if needs_fx else None
+        return list(await asyncio.gather(*(self._collect_product(code, fx) for code in codes)))
+
+    async def restore_history(self) -> None:
+        """在应用接收请求前迁移旧日志并恢复去重状态。"""
+        await asyncio.to_thread(self._repository.import_history)
+        self._latest = await asyncio.to_thread(self._repository.latest_all, tuple(self._states))
 
     async def start(self) -> None:
         """启用时随应用启动轮询，重复启动不创建额外任务。"""

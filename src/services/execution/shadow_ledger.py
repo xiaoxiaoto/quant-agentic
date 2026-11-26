@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from math import isfinite
 from threading import RLock
+from zoneinfo import ZoneInfo
 
 from src.contracts.domains.account import AccountSnapshot, OrderEvent
 from src.contracts.domains.product import FeeRule
@@ -36,7 +37,7 @@ class ShadowLedger:
         self._scope = scope
         self._restoring = False
         self._initial_cash: Decimal = self._round_cash(Decimal(str(initial_cash)))
-        self._cash_available: Decimal = Decimal(str(initial_cash))
+        self._cash_available: Decimal = self._initial_cash
         self._cash_frozen: Decimal = Decimal("0.0")
         self._gold_total_g: Decimal = Decimal("0.0")
         self._gold_available_g: Decimal = Decimal("0.0")
@@ -54,8 +55,9 @@ class ShadowLedger:
             self._restore_from_store()
 
     def _compute_open_position_cost(self, orders: list[OrderEvent]) -> Decimal:
-        """按 FIFO 先进先出核算当前在持批次的持仓总成本（含买入分摊手续费）。"""
-        lots: list[list[Decimal]] = []
+        """按移动加权平均口径核算当前在持净克重的持仓总成本（含买入分摊手续费）。"""
+        holding_g = Decimal("0.0")
+        cost_basis: Decimal | None = None
         for order in orders:
             if order.filled_grams is None or order.execution_price is None:
                 continue
@@ -63,23 +65,21 @@ class ShadowLedger:
             p = Decimal(str(order.execution_price))
             fee = Decimal(str(order.fee or 0.0))
             if order.direction == TradeDirection.BUY:
-                lots.append([g, g, p, fee])
+                outflow = self._round_cash(g * p) + self._round_cash(fee)
+                prev_cost = cost_basis or Decimal("0.0")
+                new_g = holding_g + g
+                cost_basis = (holding_g * prev_cost + outflow) / new_g if new_g > Decimal("0.0") else None
+                holding_g = self._round_gold(new_g)
             elif order.direction == TradeDirection.SELL:
-                need = g
-                for lot in lots:
-                    if lot[0] <= Decimal(0):
-                        continue
-                    take = min(lot[0], need)
-                    lot[0] = self._round_gold(lot[0] - take)
-                    need = self._round_gold(need - take)
-                    if need <= Decimal(0):
-                        break
-        total = Decimal("0.0")
-        for rem, filled, price, fee in lots:
-            if rem <= Decimal(0) or filled <= Decimal(0):
-                continue
-            total += rem * price + fee * (rem / filled)
-        return self._round_cash(total)
+                if holding_g < g:
+                    g = holding_g
+                holding_g = self._round_gold(holding_g - g)
+                if holding_g <= Decimal("0.0"):
+                    holding_g = Decimal("0.0")
+                    cost_basis = None
+        if holding_g <= Decimal("0.0") or cost_basis is None:
+            return Decimal("0.0")
+        return self._round_cash(holding_g * cost_basis)
 
     def _restore_from_store(self) -> None:
         """从持久化仓储重放历史成交事件与初始化元数据以恢复准确账本余额与成本。"""
@@ -109,9 +109,7 @@ class ShadowLedger:
                     open_cost = self._compute_open_position_cost(jd_prefix)
                     self._cash_available = self._round_cash(max(Decimal("0.0"), self._initial_cash - open_cost))
                     if interest_adjust > Decimal("0.0") and not interest_applied:
-                        self._gold_total_g = self._round_gold(self._gold_total_g + interest_adjust)
-                        self._gold_available_g = self._round_gold(self._gold_available_g + interest_adjust)
-                        self._interest_credited_g = self._round_gold(self._interest_credited_g + interest_adjust)
+                        self._credit_interest_gold(interest_adjust)
                         interest_applied = True
                     jd_anchored = True
                 if order.direction == TradeDirection.BUY:
@@ -141,11 +139,23 @@ class ShadowLedger:
                 open_cost = self._compute_open_position_cost(jd_prefix)
                 self._cash_available = self._round_cash(max(Decimal("0.0"), self._initial_cash - open_cost))
             if interest_adjust > Decimal("0.0") and not interest_applied:
-                self._gold_total_g = self._round_gold(self._gold_total_g + interest_adjust)
-                self._gold_available_g = self._round_gold(self._gold_available_g + interest_adjust)
-                self._interest_credited_g = self._round_gold(self._interest_credited_g + interest_adjust)
+                self._credit_interest_gold(interest_adjust)
         finally:
             self._restoring = False
+
+    def _credit_interest_gold(self, interest_g: Decimal) -> None:
+        """计入零成本生息克重并按总克重摊薄持仓均价成本。"""
+        if interest_g <= Decimal("0.0"):
+            return
+        old_total = self._gold_total_g
+        new_total = self._round_gold(old_total + interest_g)
+        if old_total > Decimal("0.0") and self._cost_basis_per_g is not None and new_total > Decimal("0.0"):
+            self._cost_basis_per_g = (old_total * self._cost_basis_per_g) / new_total
+        elif old_total <= Decimal("0.0"):
+            self._cost_basis_per_g = Decimal("0.0")
+        self._gold_total_g = new_total
+        self._gold_available_g = self._round_gold(self._gold_available_g + interest_g)
+        self._interest_credited_g = self._round_gold(self._interest_credited_g + interest_g)
 
     def _persist_order(self, order: OrderEvent) -> None:
         """在启用状态仓储且非恢复阶段时增量落盘单笔成交订单。"""
@@ -268,7 +278,7 @@ class ShadowLedger:
                 raise
             self._order_history.append(event)
             self._orders_by_id[client_order_id] = event
-            self._unrealized_pnl = Decimal("0.0")
+            self.mark_to_market(price)
             return event.model_copy(deep=True)
 
     def record_sell(
@@ -311,9 +321,7 @@ class ShadowLedger:
             if self._gold_available_g < g_dec:
                 if allow_interest_shortfall:
                     shortfall = self._round_gold(g_dec - self._gold_available_g)
-                    self._gold_total_g = self._round_gold(self._gold_total_g + shortfall)
-                    self._gold_available_g = self._round_gold(self._gold_available_g + shortfall)
-                    self._interest_credited_g = self._round_gold(self._interest_credited_g + shortfall)
+                    self._credit_interest_gold(shortfall)
                 else:
                     raise ValueError(f"可用黄金克重不足：需 {g_dec}g，当前可用 {self._gold_available_g}g")
 
@@ -364,7 +372,10 @@ class ShadowLedger:
                 raise
             self._order_history.append(event)
             self._orders_by_id[client_order_id] = event
-            self._unrealized_pnl = Decimal("0.0")
+            if self._gold_total_g <= Decimal("0.0"):
+                self._unrealized_pnl = Decimal("0.0")
+            else:
+                self.mark_to_market(price)
             return event.model_copy(deep=True)
 
     def mark_to_market(self, current_bid_price: float) -> Decimal:
@@ -392,7 +403,7 @@ class ShadowLedger:
                 gold_total_g=float(self._gold_total_g),
                 gold_available_g=float(self._gold_available_g),
                 gold_frozen_g=float(self._gold_frozen_g),
-                cost_basis_per_g=float(self._cost_basis_per_g) if self._cost_basis_per_g else None,
+                cost_basis_per_g=float(self._cost_basis_per_g) if self._cost_basis_per_g is not None else None,
                 realized_pnl=float(self._realized_pnl),
                 unrealized_pnl=float(self._unrealized_pnl),
                 interest_pending_g=float(self._interest_pending_g),
@@ -549,9 +560,7 @@ class ShadowLedger:
             target_dec = self._round_gold(Decimal(str(target_gold_g)))
             if target_dec > sandbox._gold_total_g:
                 interest_diff = self._round_gold(target_dec - sandbox._gold_total_g)
-                sandbox._gold_total_g = self._round_gold(sandbox._gold_total_g + interest_diff)
-                sandbox._gold_available_g = self._round_gold(sandbox._gold_available_g + interest_diff)
-                sandbox._interest_credited_g = self._round_gold(sandbox._interest_credited_g + interest_diff)
+                sandbox._credit_interest_gold(interest_diff)
 
         # 按初始资金减去当前在持批次总成本核算可用现金（在落盘与修改内存前完成校验）
         open_cost = self._compute_open_position_cost(sandbox._order_history)
@@ -590,7 +599,8 @@ class ShadowLedger:
         if not isfinite(current_bid_price) or current_bid_price < 0:
             raise ValueError("重估价格必须为非负有限数")
         as_of_utc = as_of.astimezone(UTC) if as_of.tzinfo is not None else as_of.replace(tzinfo=UTC)
-        day_start = as_of_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        shanghai_tz = ZoneInfo("Asia/Shanghai")
+        day_start = as_of_utc.astimezone(shanghai_tz).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
         week_start = as_of_utc - timedelta(days=7)
         with self._lock:
             unrealized = self.mark_to_market(current_bid_price)

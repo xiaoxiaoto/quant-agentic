@@ -15,7 +15,7 @@ interface AlertsPanelProps {
   onExecute: (
     alertId: string,
     payload: { filled_grams: number; filled_price: number; fee?: number; bank_order_id?: string }
-  ) => Promise<void>;
+  ) => Promise<boolean>;
 }
 
 const STATE_LABEL: Record<string, { text: string; cls: string }> = {
@@ -63,19 +63,23 @@ export function AlertsPanel({
 
   const handleExecuteSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!execTarget) return;
+    if (!execTarget || busyAction !== null) return;
     const g = Number(grams);
     const p = Number(price);
     if (!Number.isFinite(g) || g <= 0 || !Number.isFinite(p) || p <= 0) return;
+    const parsedFee = fee.trim() ? Number(fee) : undefined;
+    if (parsedFee !== undefined && (!Number.isFinite(parsedFee) || parsedFee < 0)) return;
     setSubmitting(true);
     try {
-      await onExecute(execTarget.alert_id, {
+      const ok = await onExecute(execTarget.alert_id, {
         filled_grams: g,
         filled_price: p,
-        fee: fee.trim() ? Number(fee) : undefined,
+        fee: parsedFee,
         bank_order_id: bankOrderId.trim() || undefined,
       });
-      setExecTarget(null);
+      if (ok) {
+        setExecTarget(null);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -276,6 +280,7 @@ export function AlertsPanel({
                 <span className="text-slate-400">实际成交克重（克） *</span>
                 <input
                   type="number"
+                  min="0.0001"
                   step="0.0001"
                   required
                   value={grams}
@@ -287,6 +292,7 @@ export function AlertsPanel({
                 <span className="text-slate-400">实际成交价（元/克） *</span>
                 <input
                   type="number"
+                  min="0.0001"
                   step="0.0001"
                   required
                   value={price}
@@ -299,6 +305,7 @@ export function AlertsPanel({
                   <span className="text-slate-400">手续费（元，可选）</span>
                   <input
                     type="number"
+                    min="0"
                     step="0.01"
                     value={fee}
                     onChange={(e) => setFee(e.target.value)}
@@ -329,7 +336,7 @@ export function AlertsPanel({
               </button>
               <button
                 type="submit"
-                disabled={submitting}
+                disabled={submitting || busyAction !== null}
                 className="rounded-lg border border-emerald-500/50 bg-emerald-500/20 px-5 py-2 font-semibold text-emerald-300 transition hover:bg-emerald-500/30 hover:border-emerald-400 disabled:opacity-50"
               >
                 {submitting ? "登记中…" : "确认登记"}

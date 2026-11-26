@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import operator
 import statistics
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -82,7 +83,7 @@ class TrainingPipelineService:
         if reference_product_code is not None:
             if self._live_quotes is None:
                 raise ValueError("未配置参考行情采集器，无法从参考行情库构建样本")
-            refs = self._live_quotes.query_series(reference_product_code)
+            refs = self._live_quotes.query_series(reference_product_code, limit=None)
             raw_quotes = [
                 self._reference_to_quote(item, spread_pct=spread_pct)
                 for item in refs
@@ -126,24 +127,27 @@ class TrainingPipelineService:
         if self._live_quotes is None:
             return [], []
         try:
-            refs = self._live_quotes.query_series(self._basis_reference_product)
+            refs = self._live_quotes.query_series(self._basis_reference_product, limit=None)
         except ValueError:
             return [], []
-        times: list[datetime] = []
-        prices: list[float] = []
+        pairs: list[tuple[datetime, float]] = []
         for item in refs:
             if item.unit != "CNY/g" or item.price <= 0 or item.quality_state == DataQualityState.ANOMALY:
                 continue
             ts = item.available_at or item.received_at
-            times.append(ts)
-            prices.append(item.price)
+            ts_utc = ts.astimezone(UTC) if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+            pairs.append((ts_utc, item.price))
+        pairs.sort(key=operator.itemgetter(0))
+        times = [pair[0] for pair in pairs]
+        prices = [pair[1] for pair in pairs]
         return times, prices
 
     @staticmethod
     def _lookup_basis_price(times: list[datetime], prices: list[float], as_of: datetime) -> float | None:
         if not times:
             return None
-        idx = bisect.bisect_right(times, as_of) - 1
+        as_of_utc = as_of.astimezone(UTC) if as_of.tzinfo is not None else as_of.replace(tzinfo=UTC)
+        idx = bisect.bisect_right(times, as_of_utc) - 1
         return prices[idx] if idx >= 0 else None
 
     def build_samples(
@@ -169,11 +173,14 @@ class TrainingPipelineService:
         quote_times = [q.quote_at for q in series]
         basis_times, basis_prices = self._load_basis_series()
         samples: list[TrainingSample] = []
+        pit_times = [max(q.quote_at, q.received_at, q.available_at or q.received_at) for q in series]
+        monotonic_pit = all(pit_times[i] >= pit_times[i - 1] for i in range(1, len(pit_times)))
+        stream = self._features.create_stream() if monotonic_pit and hasattr(self._features, "create_stream") else None
 
         for idx, entry_q in enumerate(series):
-            history = series[: idx + 1]
-            as_of = max(entry_q.quote_at, entry_q.received_at, entry_q.available_at or entry_q.received_at)
+            as_of = pit_times[idx]
             basis_ref = self._lookup_basis_price(basis_times, basis_prices, as_of)
+            exits: dict[HoldingPeriod, tuple[QuoteRaw, float]] = {}
 
             for horizon in target_horizons:
                 target_end = entry_q.quote_at + timedelta(hours=self._HORIZON_HOURS[horizon])
@@ -184,14 +191,32 @@ class TrainingPipelineService:
                 net_ret = self._calculator.net_return(entry_ask=entry_q.ask_price, exit_bid=exit_q.bid_price)
                 if not math.isfinite(net_ret) or net_ret <= -1.0:
                     continue
-                features = self._features.extract_features(
-                    history,
-                    intl_ref_cny=basis_ref,
+                exits[horizon] = (exit_q, net_ret)
+
+            if stream is not None:
+                feats_by_horizon = stream.push_and_extract(
+                    entry_q,
                     as_of=as_of,
-                    horizon=horizon,
+                    horizons=tuple(exits.keys()),
+                    intl_ref_cny=basis_ref,
                 )
+            elif exits:
+                history = series[: idx + 1]
+                feats_by_horizon = {
+                    horizon: self._features.extract_features(
+                        history,
+                        intl_ref_cny=basis_ref,
+                        as_of=as_of,
+                        horizon=horizon,
+                    )
+                    for horizon in exits
+                }
+            else:
+                continue
+
+            for horizon, (exit_q, net_ret) in exits.items():
                 # 确保特征时间锚定在入场报价时刻，且标签覆盖目标持有期
-                features = features.model_copy(update={"as_of": entry_q.quote_at})
+                features = feats_by_horizon[horizon].model_copy(update={"as_of": entry_q.quote_at})
                 samples.append(
                     TrainingSample(
                         features=features,

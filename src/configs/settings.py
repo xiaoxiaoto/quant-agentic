@@ -28,3 +28,36 @@ class Settings(AppSettings, ServerSettings, TradingSettings, ModelSettings, JDSe
     def database_path(self) -> Path:
         """返回应用和授权命令共用的 SQLite 路径。"""
         return self.resolved_data_dir / "quant-agentic.sqlite3"
+
+    @property
+    def resolved_qlib_provider_uri(self) -> Path:
+        """返回锚定后的本地 Qlib 数据目录，默认跟随 resolved_data_dir。"""
+        if self.qlib_provider_uri == "data/qlib_data":
+            return self.resolved_data_dir / "qlib_data"
+        return self.resolve_project_path(self.qlib_provider_uri)
+
+    @property
+    def resolved_qlib_experiment_dir(self) -> Path:
+        """返回锚定后的 Qlib 实验记录目录，默认跟随 resolved_data_dir。"""
+        if self.qlib_experiment_dir == "data/qlib_experiments":
+            return self.resolved_data_dir / "qlib_experiments"
+        return self.resolve_project_path(self.qlib_experiment_dir)
+
+    @property
+    def resolved_qlib_external_provider_uri(self) -> Path | None:
+        """返回锚定后的外部标准 Qlib 数据目录。"""
+        if not self.qlib_external_provider_uri:
+            return None
+        return self.resolve_project_path(self.qlib_external_provider_uri)
+
+    @property
+    def resolved_qlib_model_dir(self) -> Path | None:
+        """返回锚定后的 Qlib 推理模型产物目录。"""
+        if not self.qlib_model_dir:
+            return None
+        return self.resolve_project_path(self.qlib_model_dir)
+
+    def resolve_project_path(self, raw_path: str) -> Path:
+        """将相对配置路径锚定到项目根目录，绝对路径原样返回。"""
+        path = Path(raw_path)
+        return path if path.is_absolute() else self._PROJECT_ROOT / path

@@ -153,6 +153,7 @@ export interface ModelStatusResponse {
     page_size: number;
     news_agent_ready: boolean;
     last_report: NewsSyncReport | null;
+    errors?: Record<string, string>;
   };
 }
 
@@ -175,7 +176,7 @@ export interface NewsEvent {
   event_type: string;
   severity: number;
   confidence: number;
-  summary: string;
+  summary: string | null;
   risk_flags: string[];
 }
 
@@ -192,13 +193,20 @@ export interface NewsOverviewResponse {
   lock_reason: string | null;
   active_risk_flags: string[];
   news_events: NewsEvent[];
+  jd_articles: {
+    article_id: string;
+    channel: "flash" | "news" | "morning";
+    source: string;
+    title: string;
+    content: string;
+    published_at: string;
+  }[];
   macro_events: MacroCalendarEvent[];
 }
 
 export interface SnapshotReconcileResponse {
   report: ReconciliationReport;
   recommended_risk_state: string;
-  kill_switch_active: boolean;
 }
 
 export interface BaselineMetric {
@@ -255,13 +263,49 @@ export interface JDHoldingItem {
   bankName: string;
   totalGram: number;
   avgCostPrice: number;
-  totalIncome: number;
+  totalIncome: number | null;
 }
 
 export interface JDHoldingsResponse {
   totalGramAll: number;
   avgCostPrice: number;
   holdingList: JDHoldingItem[];
+}
+
+export interface JDHoldingsSnapshot {
+  data: JDHoldingsResponse | null;
+  collected_at: string | null;
+  last_success_at: string | null;
+  status: "pending" | "fresh" | "stale" | "auth_required";
+}
+
+export interface JDAuthStatusResponse {
+  logged_in: boolean;
+  usable_seconds: number | null;
+  expires_at: string | null;
+  reauth_recommended: boolean;
+  reauth_lead_seconds?: number;
+  refresh_supported: boolean;
+  pending_login: boolean;
+  pending_login_expires_at: string | null;
+  authorize_url: string | null;
+  auto_renew_enabled?: boolean;
+  auto_renew_in_progress?: boolean;
+  last_auto_renew_at?: string | null;
+  last_auto_renew_status?: "idle" | "running" | "succeeded" | "failed";
+  last_auto_renew_error?: string | null;
+}
+
+export interface JDAuthLoginResponse {
+  authorize_url: string;
+  expires_at: string | null;
+  message: string;
+}
+
+export interface JDAuthActionResponse {
+  ok: boolean;
+  message: string;
+  status: JDAuthStatusResponse;
 }
 
 export interface WalkForwardFoldReport {

@@ -134,7 +134,7 @@ uv run python -m src.runtime.jd_auth status
 
 客户端不自动打开服务端浏览器，也不在后台轮询兑换；命令行 `login` 才负责打开本机浏览器。不复制技能内置密钥；登录授权不会提供分析网关密钥。401 清除登录态，403 保留受限错误，不重试或自动重放交易；模拟交易没有挂到应用路由或后台任务。已完成真实账号授权、SQLite 跨进程恢复与持仓查询权限验证；其余需授权业务接口依据原技能契约迁移，已做模拟测试，尚未逐一远端验收；公开参考行情的远端验证情况见下文。
 
-默认 `LIVE_QUOTES_ENABLED=true`，服务启动后后台轮询全部 29 个参考行情品种：民生、兴业、广发、浙商、工商、中信、浦发 7 家银行积存金，京东金价指数，伦敦金、伦敦银、现货铂金、现货钯金，以及 17 个上金所黄金、白银、铂金品种。完整编码、名称、单位和价格方向由 `GET /api/v1/quotes/live/products` 返回。采集限制为最多 3 个并发请求，每轮结束后默认等待 10 秒；关闭服务时停止轮询并释放连接。可通过 `.env` 的 `LIVE_QUOTES_INTERVAL_SECONDS` 调整等待时间（5～300 秒），`JD_TIMEOUT_SECONDS` 控制单次超时。测试进程显式关闭外部采集。
+默认 `LIVE_QUOTES_ENABLED=true`，服务启动后后台轮询全部 29 个参考行情品种：民生、兴业、广发、浙商、工商、中信、浦发 7 家银行积存金，京东金价指数，伦敦金、伦敦银、现货铂金、现货钯金，以及 17 个上金所黄金、白银、铂金品种。完整编码、名称、单位和价格方向由 `GET /api/v1/quotes/live/products` 返回。京东任务共用最多 3 个并发 HTTP 连接，参考行情每轮结束后默认等待 10 秒；关闭服务时停止轮询并释放连接。可通过 `.env` 的 `LIVE_QUOTES_INTERVAL_SECONDS` 调整等待时间（5～300 秒），`JD_TIMEOUT_SECONDS` 控制单次超时。测试进程显式关闭外部采集。
 
 `live_quotes_products` 为可选元组配置：`LIVE_QUOTES_PRODUCTS=null` 默认轮询全部品种，也可使用 JSON 数组限定后台采集子集。例如：
 
@@ -162,7 +162,24 @@ curl http://127.0.0.1:8000/api/v1/quotes/live/status/all
 
 2026-11-18 公开行情实测中，29 个品种有 28 个返回价格，浦发积存金返回业务错误 `10009999`。银行、京东指数及国际贵金属的通用行情响应缺少有效源时间，上金所返回的部分源时间陈旧，分别按 `GAP`、`STALE` 展示；支持查询和采集不表示全部品种当前都有有效实时数据。
 
-参考价独立保存到 `DATA_DIR/references/references_YYYY-MM-DD.jsonl`，可在重启后读取并校验完整性，兼容此前民生日志；原始接收时间不会改写。该入口没有银行双边价，返回固定 `is_tradable=false`，不写入交易报价仓储，也不参与现有交易决策。当前为单进程轮询，多 worker 会各自采集。
+参考价与用于展示的 USD/CNY 汇率保存到 `DATA_DIR/quant-agentic.sqlite3`。采集实例启动时导入旧版 `references_*.jsonl`，保留原始接收时间和完整性校验。参考价返回固定 `is_tradable=false`。
+
+### 京东后台采集与工作台刷新
+
+工作台首次加载、自动刷新和手动刷新均从 SQLite 读取最近已提交的行情、资讯和实盘持仓。行情或新闻的显式采集 POST 接口可用于运维补采。
+
+- `NEWS_SYNC_ENABLED=true` 时，每轮采集黄金资讯、快讯及已授权可访问的早报。快讯补扫至上一次成功进度，分页异常时保留已入库文章和原进度。固定窗口接口只能补到上游仍可查询的记录。启用 News LLM 后，已落库原文的风险提取可独立重试。只采集原文可设置 `NEWS_ENABLED=false`。
+- `JD_HOLDINGS_SYNC_ENABLED=true` 时，在有效授权下按 `JD_HOLDINGS_SYNC_INTERVAL_SECONDS`（默认 60 秒）确认实盘持仓。快照按授权凭据隔离，内容改变才新增版本。过期凭据可读取该凭据对应的最后成功快照。换绑或凭据轮换后等待新快照。
+- `GET /api/v1/jd/holdings/snapshot` 返回本地持仓、最近成功时间和采集状态。`GET /api/v1/jd/news` 返回所选频道的已采集文章，`query` 在已采集的黄金资讯内筛选。
+
+在项目根目录预先构建前端后，由 macOS `launchd` 或 Linux `systemd` 托管下列命令。设置项目根目录为工作目录，固定 `DATA_DIR`，并启用异常退出重启。API 与 `live run` 共用采集互斥锁，同一个数据目录仅允许一个开启采集的实例。
+
+```bash
+pnpm --dir web build
+uv run uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+仓库内提供 [launchd 模板](dev/quant-agentic.plist) 和 [systemd 用户服务模板](dev/quant-agentic.service)。安装前替换工作目录及 `uv` 的绝对路径，并按需配置 `.env`。使用 `launchd` 时替换日志路径并创建日志目录，`systemd` 使用 journal。
 
 本地 HTTP 故障模拟（Postman CLI，无需登录）：
 

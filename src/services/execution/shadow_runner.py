@@ -13,7 +13,7 @@ from src.contracts.domains.execution import RFQRequest
 from src.contracts.domains.feature import ModelPrediction
 from src.contracts.domains.product import FeeRule
 from src.contracts.domains.quote import QuoteRaw
-from src.contracts.enums.trading import DataQualityState, DecisionAction, HoldingPeriod, TradeDirection
+from src.contracts.enums.trading import DataQualityState, DecisionAction, HoldingPeriod, RiskState, TradeDirection
 from src.services.decision.cost_calculator import CostCalculator
 from src.services.decision.decision_engine import DecisionEngine
 from src.services.execution.rfq_execution import RFQExecutionEngine
@@ -90,6 +90,8 @@ class ShadowRunner:
         total_fees = 0.0
         warmup_count = 0
         last_valid_bid: float | None = None
+        last_signal_at: datetime | None = None
+        risk_state = RiskState.NORMAL
 
         # 增量特征提取会话，复用双周期公共特征与在线波动率统计，避免 O(n²) 重复计算
         feature_stream = self._features.create_stream() if hasattr(self._features, "create_stream") else None
@@ -142,18 +144,28 @@ class ShadowRunner:
                 account=snap,
                 target_buy_grams=trade_grams_per_order,
                 as_of=current_time,
+                last_signal_at=last_signal_at,
             )
 
-            # 4. 独立风控一票否决
-            approved_dec, _, violations = self._risk.check_decision(
+            # 4. 独立风控一票否决（含日/周回撤状态推进）
+            valuation_bid = curr_q.bid_price if is_valid_quote else last_valid_bid
+            if valuation_bid is not None:
+                daily_pnl, weekly_pnl = ledger.compute_period_pnl(current_time, valuation_bid)
+            else:
+                daily_pnl, weekly_pnl = None, None
+            approved_dec, risk_state, violations = self._risk.check_decision(
                 decision=dec,
                 account=snap,
                 current_ask_price=curr_q.ask_price,
                 current_bid_price=curr_q.bid_price,
+                risk_state=risk_state,
+                daily_pnl=daily_pnl,
+                weekly_pnl=weekly_pnl,
             )
 
             # 5. RFQ 成交模型仿真
             if approved_dec.action in (DecisionAction.BUY, DecisionAction.SELL):
+                last_signal_at = current_time
                 direction = TradeDirection.BUY if approved_dec.action == DecisionAction.BUY else TradeDirection.SELL
                 req = RFQRequest(
                     request_id=f"req_{i}",

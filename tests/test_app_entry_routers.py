@@ -1,5 +1,6 @@
 """新增 App 级业务路由（backtest / paper / live / jd / quotes quality / alerts execute）单元测试。"""
 
+import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,10 +8,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
 
 from main import app
-from src.clients.jd_gold import JDGoldError, JDGoldLoginRequiredError
+from src.clients.jd_gold import JDGoldError
 from src.configs.settings import Settings
 from src.contracts.domains.quote import QuoteRaw
 from src.contracts.enums.trading import DataQualityState
@@ -31,8 +31,11 @@ def isolated_runtime(tmp_path: Path) -> Iterator[RuntimeDependencies]:
         )
     )
     app.dependency_overrides[RuntimeDependencies.from_request] = lambda: runtime
-    yield runtime
-    app.dependency_overrides.clear()
+    try:
+        yield runtime
+    finally:
+        app.dependency_overrides.clear()
+        asyncio.run(runtime.close())
 
 
 def _seed_quote(runtime: RuntimeDependencies, quote_id: str = "app_q_1") -> None:
@@ -178,8 +181,8 @@ def test_jd_routes_forwarding_and_error_mapping() -> None:
     with (
         patch(
             "src.services.jd_gold.trade.JDGoldTradeService.get_holdings",
-            new=AsyncMock(return_value={"totalGram": 10.5}),
-        ),
+            new=AsyncMock(side_effect=AssertionError("刷新访问了上游持仓")),
+        ) as upstream_holdings,
         patch(
             "src.services.jd_gold.trade.JDGoldTradeService.list_conditional_orders",
             new=AsyncMock(return_value={"items": []}),
@@ -189,19 +192,13 @@ def test_jd_routes_forwarding_and_error_mapping() -> None:
             new=AsyncMock(return_value={"signals": []}),
         ),
     ):
-        assert client.get("/api/v1/jd/holdings").json() == {"totalGram": 10.5}
+        assert client.get("/api/v1/jd/holdings").status_code == 401
+        assert client.get("/api/v1/jd/holdings/snapshot").json()["status"] == "auth_required"
+        upstream_holdings.assert_not_awaited()
         cond_resp = client.get("/api/v1/jd/conditional-orders?start_date=2026-11-01&end_date=2026-11-24")
         assert cond_resp.status_code == 200
         assert mock_cond.await_count == 1
         assert client.get("/api/v1/jd/analysis/opportunities").json() == {"signals": []}
-
-    # 未登录异常应映射为 401
-    with patch(
-        "src.services.jd_gold.trade.JDGoldTradeService.get_holdings",
-        new=AsyncMock(side_effect=JDGoldLoginRequiredError(SecretStr("https://auth.example.com"))),
-    ):
-        resp_401 = client.get("/api/v1/jd/holdings")
-        assert resp_401.status_code == 401
 
     # 上游业务异常应映射为 502
     with patch(

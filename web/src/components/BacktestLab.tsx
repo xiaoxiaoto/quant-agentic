@@ -96,6 +96,7 @@ export function BacktestLab({ busyAction, result, onRunBacktest }: BacktestLabPr
             <span>初始资金</span>
             <input
               type="number"
+              min="100"
               value={cash}
               onChange={(e) => setCash(e.target.value)}
               className="field px-3 py-1 outline-none"
@@ -105,7 +106,8 @@ export function BacktestLab({ busyAction, result, onRunBacktest }: BacktestLabPr
             <span>单笔克重</span>
             <input
               type="number"
-              step="0.5"
+              min="0.1"
+              step="0.1"
               value={grams}
               onChange={(e) => setGrams(e.target.value)}
               className="field px-3 py-1 outline-none"
@@ -115,6 +117,7 @@ export function BacktestLab({ busyAction, result, onRunBacktest }: BacktestLabPr
             <span>定投步长</span>
             <input
               type="number"
+              min="1"
               value={dcaStep}
               onChange={(e) => setDcaStep(e.target.value)}
               className="field px-3 py-1 outline-none"

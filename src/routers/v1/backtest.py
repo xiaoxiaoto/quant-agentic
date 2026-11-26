@@ -26,11 +26,12 @@ def run_backtest(
     """运行历史 PIT 回测并与被动基准策略进行横向对比。"""
     settings = runtime.settings
     try:
+        quotes_file = runtime.resolve_data_path(payload.quotes_file) if payload.quotes_file is not None else None
         return runtime.backtest.run(
             product_code=payload.product_code or settings.default_product_code,
             start_time=payload.start_time,
             end_time=payload.end_time,
-            quotes_file=payload.quotes_file,
+            quotes_file=quotes_file,
             initial_cash=payload.initial_cash or settings.default_initial_cash,
             trade_grams_per_order=payload.trade_grams or settings.default_trade_grams,
             dca_step_interval=payload.dca_step_interval,

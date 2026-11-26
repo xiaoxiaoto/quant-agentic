@@ -7,10 +7,10 @@ import { QuoteQuality, QuoteTime } from "./QuoteMetadata";
 interface MarketsViewProps {
   products: ReferenceProduct[];
   statuses: LiveQuoteStatus[];
-  busyAction: string | null;
+  refreshing: boolean;
   loading: boolean;
   quotesFailed: boolean;
-  onCollectAll: () => void;
+  onRefresh: () => void;
 }
 
 const CATEGORIES = {
@@ -22,7 +22,7 @@ const CATEGORIES = {
 };
 const BANK_SIDES = ["reference", "buy"] as const;
 
-export function MarketsView({ products, statuses, busyAction, loading, quotesFailed, onCollectAll }: MarketsViewProps) {
+export function MarketsView({ products, statuses, refreshing, loading, quotesFailed, onRefresh }: MarketsViewProps) {
   const [category, setCategory] = useState("all");
   const [keyword, setKeyword] = useState("");
   const statusMap = new Map(statuses.map((status) => [status.product_code, status]));
@@ -55,12 +55,12 @@ export function MarketsView({ products, statuses, busyAction, loading, quotesFai
 
           <button
             type="button"
-            onClick={onCollectAll}
-            disabled={busyAction !== null}
+            onClick={onRefresh}
+            disabled={refreshing}
             className="secondary-button"
           >
-            <RefreshCw className={`size-3.5 ${busyAction === "collect-all" ? "animate-spin" : ""}`} />
-            {busyAction === "collect-all" ? "采集中…" : "采集全部行情"}
+            <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
+            {refreshing ? "读取中…" : "刷新行情"}
           </button>
         </div>
 

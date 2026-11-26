@@ -7,22 +7,21 @@
 import math
 from statistics import NormalDist
 
-from src.agents.lightgbm import LightGBMAgent
-from src.contracts.domains.feature import FeatureSet, ModelPrediction
+from src.contracts.domains.feature import FeatureSet, ModelPrediction, NetReturnModelProtocol
 from src.contracts.domains.product import FeeRule
 from src.contracts.enums.trading import HoldingPeriod
 from src.services.decision.cost_calculator import CostCalculator
 
 
 class ModelPredictor:
-    """优先使用按持有期训练的模型，兼容未配置模型的研究原型。"""
+    """优先使用按持有期训练的模型（LightGBM 或 Qlib），兼容未配置模型的研究原型。"""
 
     def __init__(
         self,
         confidence_level: float = 0.90,
         base_uncertainty: float = 0.008,
         fee_rule: FeeRule | None = None,
-        model: LightGBMAgent | None = None,
+        model: NetReturnModelProtocol | None = None,
     ) -> None:
         self._model = model
         self._cost = CostCalculator(fee_rule)

@@ -98,10 +98,15 @@ class SessionCalendar:
         """返回 dt 之后的下一个非节假日开市时间（周一为常规开盘点，周二至周五顺延自 00:00）。"""
         local = self._to_local(dt)
         wd = local.weekday()
-        days_until_monday = (self._open_day - wd) % 7
-        if days_until_monday == 0 and local.time() >= self._open_time:
-            days_until_monday = 7
-        candidate = local.date() + timedelta(days=days_until_monday)
+        if local.date() in self._holidays:
+            candidate = local.date() + timedelta(days=1)
+        elif wd == self._open_day and local.time() < self._open_time:
+            candidate = local.date()
+        else:
+            days_until_monday = (self._open_day - wd) % 7
+            if days_until_monday == 0:
+                days_until_monday = 7
+            candidate = local.date() + timedelta(days=days_until_monday)
         # 若候选开市日为节假日，逐日顺延至下一个有效交易日
         while True:
             cand_wd = candidate.weekday()

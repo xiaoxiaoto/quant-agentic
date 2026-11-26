@@ -4,12 +4,13 @@
 """
 
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import AwareDatetime
 
 from src.clients.jd_gold import JDGoldError
+from src.contracts.domains.market_bar import KLineBar, MarketBarCollectorStatus, TimeSharingPoint
 from src.contracts.domains.quality import CollectorQualityReport
 from src.contracts.domains.quote import QuoteRaw
 from src.contracts.domains.reference_quote import (
@@ -19,6 +20,7 @@ from src.contracts.domains.reference_quote import (
     ReferenceQuote,
 )
 from src.contracts.enums.trading import DataQualityState
+from src.contracts.exceptions import StorageError
 from src.contracts.schemas import QuoteIngestRequest
 from src.runtime.dependencies import RuntimeDependencies
 
@@ -45,7 +47,7 @@ def get_all_live_statuses(
     runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
 ) -> list[LiveQuoteStatus]:
     """查看各品种的成功、失败及时间质量状态。"""
-    return [runtime.live_quotes.status(product.code) for product in ReferenceProductCatalog.all()]
+    return runtime.live_quotes.statuses()
 
 
 @router.get("/live/latest/all", response_model=list[ReferenceQuote])
@@ -53,11 +55,7 @@ def get_all_live_quotes(
     runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
 ) -> list[ReferenceQuote]:
     """读取各品种最新已保存参考价，无记录的品种见状态列表。"""
-    return [
-        quote
-        for product in ReferenceProductCatalog.all()
-        if (quote := runtime.live_quotes.latest(product.code)) is not None
-    ]
+    return [status.latest for status in runtime.live_quotes.statuses() if status.latest is not None]
 
 
 @router.post("/live/collect/all", response_model=list[LiveQuoteStatus])
@@ -117,8 +115,80 @@ async def collect_live_reference_quote(
         return await runtime.live_quotes.collect_once(product_code)
     except (JDGoldError, ValueError):
         raise HTTPException(status_code=502, detail="京东参考行情暂不可用，详情见采集状态") from None
-    except OSError:
+    except (OSError, StorageError):
         raise HTTPException(status_code=503, detail="参考行情存储暂不可用") from None
+
+
+@router.get("/bars/status", response_model=MarketBarCollectorStatus)
+def get_market_bars_status(
+    runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
+) -> MarketBarCollectorStatus:
+    """查询多周期 K 线与分时采集器运行状态。"""
+    return runtime.market_bars.status()
+
+
+@router.post("/bars/collect", response_model=MarketBarCollectorStatus)
+async def collect_market_bars(
+    runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
+) -> MarketBarCollectorStatus:
+    """立即触发一轮多周期 K 线与分时数据采集。"""
+    if not runtime.settings.market_bars_enabled:
+        raise HTTPException(status_code=503, detail="多周期 K 线与分时采集未启用")
+    return await runtime.market_bars.collect_once()
+
+
+@router.get("/bars/kline", response_model=list[KLineBar])
+def query_market_klines(
+    runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
+    product_code: Annotated[str, Depends(validate_live_product)],
+    interval: Annotated[
+        Literal["m1", "m5", "m15", "m30", "m60", "day", "week", "month", "year"],
+        Query(description="K 线周期（m1/m5/m15/m30/m60/day/week/month/year）"),
+    ] = "day",
+    source: Annotated[
+        Literal["jd_public_kline", "jd_sim_kline"] | None,
+        Query(description="可选数据来源过滤（jd_public_kline / jd_sim_kline）"),
+    ] = None,
+    start_time: Annotated[AwareDatetime | None, Query(description="起始时间（带时区）")] = None,
+    end_time: Annotated[AwareDatetime | None, Query(description="结束时间（带时区）")] = None,
+    limit: Annotated[int, Query(ge=1, le=5000, description="返回最大条数")] = 500,
+) -> list[KLineBar]:
+    """查询 SQLite 中已采集的多周期 K 线历史序列。"""
+    if start_time is not None and end_time is not None and start_time > end_time:
+        raise HTTPException(status_code=400, detail="起始时间不得晚于结束时间")
+    return runtime.market_bars.query_klines(
+        product_code,
+        interval,
+        source=source,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+    )
+
+
+@router.get("/bars/timesharing", response_model=list[TimeSharingPoint])
+def query_market_timesharing(
+    runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
+    product_code: Annotated[str, Query(description="参考品种编码")] = "WG-JDAU",
+    granularity: Annotated[
+        Literal["m1", "m5"],
+        Query(description="分时颗粒度（m1/m5）"),
+    ] = "m1",
+    start_time: Annotated[AwareDatetime | None, Query(description="起始时间（带时区）")] = None,
+    end_time: Annotated[AwareDatetime | None, Query(description="结束时间（带时区）")] = None,
+    limit: Annotated[int, Query(ge=1, le=5000, description="返回最大条数")] = 1500,
+) -> list[TimeSharingPoint]:
+    """查询 SQLite 中已采集的分时走势点位序列。"""
+    validate_live_product(product_code)
+    if start_time is not None and end_time is not None and start_time > end_time:
+        raise HTTPException(status_code=400, detail="起始时间不得晚于结束时间")
+    return runtime.market_bars.query_time_sharing(
+        product_code,
+        granularity,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+    )
 
 
 @router.post("", response_model=QuoteRaw)

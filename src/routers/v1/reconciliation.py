@@ -24,15 +24,12 @@ def reconcile_snapshot(
     payload: SnapshotReconcileRequest,
     runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
 ) -> SnapshotReconcileResponse:
-    """核对当前本地影子账本快照与银行官方资产。"""
-    local_snap = runtime.ledger.take_snapshot()
-    report, risk = runtime.reconciliation.reconcile_snapshot(
-        local_snapshot=local_snap,
+    """核对当前本地影子账本快照与银行官方资产，差异时自动熔断并触发急停。"""
+    report, risk = runtime.live.reconcile_snapshot(
         bank_cash=payload.bank_cash,
         bank_gold_g=payload.bank_gold_g,
         bank_cost_basis=payload.bank_cost_basis,
     )
-    runtime.state_store.save_reconciliation_report(report)
     return SnapshotReconcileResponse(
         report=report,
         recommended_risk_state=risk,
@@ -44,12 +41,11 @@ def reconcile_orders(
     payload: OrdersReconcileRequest,
     runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
 ) -> SnapshotReconcileResponse:
-    """逐笔核对本地订单流水与银行官方交易流水。"""
-    report, risk = runtime.reconciliation.reconcile_orders(
+    """逐笔核对本地订单流水与银行官方交易流水，差异时自动熔断并触发急停。"""
+    report, risk = runtime.live.reconcile_orders(
         local_orders=list(payload.local_orders),
         bank_statements=list(payload.bank_statements),
     )
-    runtime.state_store.save_reconciliation_report(report)
     return SnapshotReconcileResponse(
         report=report,
         recommended_risk_state=risk,
@@ -59,15 +55,25 @@ def reconcile_orders(
 @router.post("/jd-holdings", response_model=SnapshotReconcileResponse)
 async def reconcile_with_jd_holdings(
     runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
-    bank_cash: float | None = Query(default=None, ge=0, description="可选银行现金余额（未提供时以本地现金为基准）"),
+    bank_cash: float | None = Query(
+        default=None, ge=0, allow_inf_nan=False, description="可选银行现金余额（未提供时以本地现金为基准）"
+    ),
 ) -> SnapshotReconcileResponse:
     """拉取京东黄金实盘持仓并自动与本地影子账本对账，差异时自动熔断。"""
     try:
         report, risk = await runtime.live.reconcile_with_jd_holdings(bank_cash=bank_cash)
-    except JDGoldLoginRequiredError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from None
+    except JDGoldLoginRequiredError:
+        raise HTTPException(
+            status_code=401,
+            detail="京东账户尚未授权或登录态已过期，请先发起京东登录授权",
+        ) from None
     except JDGoldError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from None
+        if exc.code == "AUTH_REQUIRED":
+            raise HTTPException(
+                status_code=401,
+                detail="京东账户尚未授权或登录态已过期，请先发起京东登录授权",
+            ) from None
+        raise HTTPException(status_code=502, detail=f"京东上游接口调用失败（{exc.code}）") from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return SnapshotReconcileResponse(

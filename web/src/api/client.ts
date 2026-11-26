@@ -2,14 +2,16 @@ import type {
   AccountSnapshot,
   AlertPayload,
   BacktestSummary,
-  JDHoldingsResponse,
+  JDAuthActionResponse,
+  JDAuthLoginResponse,
+  JDAuthStatusResponse,
+  JDHoldingsSnapshot,
   LiveQuoteStatus,
   LiveStatusResponse,
   LiveStepResult,
   MacroCalendarEvent,
   ModelStatusResponse,
   NewsOverviewResponse,
-  NewsSyncReport,
   OrderEvent,
   PaperStepResult,
   ReconciliationReport,
@@ -76,7 +78,6 @@ export const api = {
 
   getReferenceProducts: (signal?: AbortSignal) => request<ReferenceProduct[]>("/api/v1/quotes/live/products", { signal }),
   getAllQuoteStatuses: (signal?: AbortSignal) => request<LiveQuoteStatus[]>("/api/v1/quotes/live/status/all", { signal }),
-  collectAllQuotes: () => request<LiveQuoteStatus[]>("/api/v1/quotes/live/collect/all", { method: "POST" }),
 
   getModelStatus: (signal?: AbortSignal) => request<ModelStatusResponse>("/api/v1/models/status", { signal }),
   getNewsOverview: (limit = 50, signal?: AbortSignal) => request<NewsOverviewResponse>(`/api/v1/models/news/overview?limit=${limit}`, { signal }),
@@ -90,15 +91,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  syncNewsFlash: (pageSize = 10) =>
-    request<NewsSyncReport>(`/api/v1/models/news/sync?page_size=${pageSize}`, { method: "POST" }),
 
-  reconcileJdHoldings: (bankCash?: number) =>
-    request<SnapshotReconcileResponse>("/api/v1/reconciliation/jd-holdings", {
+  reconcileJdHoldings: (bankCash?: number) => {
+    const query = bankCash !== undefined ? `?bank_cash=${encodeURIComponent(bankCash)}` : "";
+    return request<SnapshotReconcileResponse>(`/api/v1/reconciliation/jd-holdings${query}`, {
       method: "POST",
-      body: JSON.stringify(bankCash !== undefined ? { bank_cash: bankCash } : {}),
-    }),
-  getJdHoldings: (signal?: AbortSignal) => request<JDHoldingsResponse>("/api/v1/jd/holdings", { signal }),
+    });
+  },
+  getJdHoldings: (signal?: AbortSignal) => request<JDHoldingsSnapshot>("/api/v1/jd/holdings/snapshot", { signal }),
+  getJdAuthStatus: (signal?: AbortSignal) => request<JDAuthStatusResponse>("/api/v1/jd/auth/status", { signal }),
+  startJdLogin: () => request<JDAuthLoginResponse>("/api/v1/jd/auth/login", { method: "POST" }),
+  completeJdLogin: () => request<JDAuthActionResponse>("/api/v1/jd/auth/complete", { method: "POST" }),
+  renewJdAuth: () => request<JDAuthActionResponse>("/api/v1/jd/auth/renew", { method: "POST" }),
+  verifyJdAuth: () => request<JDAuthActionResponse>("/api/v1/jd/auth/verify", { method: "POST" }),
+  logoutJdAuth: () => request<JDAuthActionResponse>("/api/v1/jd/auth/logout", { method: "POST" }),
   listReconciliationReports: (limit = 20, signal?: AbortSignal) =>
     request<ReconciliationReport[]>(`/api/v1/reconciliation/reports?limit=${limit}`, { signal }),
   listOrders: (signal?: AbortSignal, limit?: number) =>

@@ -4,6 +4,7 @@
 """
 
 from datetime import datetime
+from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -98,3 +99,15 @@ class ModelPrediction(BaseModel):
         default_factory=dict,
         description="主要输入特征贡献度字典",
     )
+
+
+class NetReturnModelProtocol(Protocol):
+    """按持有期输出扣费净收益预测与元信息的模型协议。"""
+
+    def predict(self, features: FeatureSet, horizon: HoldingPeriod) -> ModelPrediction:
+        """根据输入特征向量输出目标持有期的扣费净收益预测。"""
+        ...
+
+    def get_model_info(self) -> dict[str, Any]:
+        """返回模型版本、训练校准边界与运行元信息。"""
+        ...

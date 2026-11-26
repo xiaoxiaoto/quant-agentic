@@ -165,7 +165,7 @@ This project follows a strict layered architecture. Each layer may import any la
 
 ## External systems
 
-京东接口统一位于 `src/clients/jd_gold.py`，与 `src/repositories` 同层且互不依赖。`JDGoldGateway` 整合共享客户端和 SQLite 授权仓储；应用生命周期默认轮询全部 29 个公开参考行情品种（7 家银行积存金、京东指数、4 种国际贵金属、17 种上金所品种），最多 3 请求并发，每轮完成后等待配置周期，独立存储于 `DATA_DIR/references`，不构造双边报价、不接入交易决策。账户授权状态通过 contracts 层存储协议注入，由 `JDGoldAuthRepository` 保存到 `DATA_DIR/quant-agentic.sqlite3`；CLI `uv run python -m src.runtime.jd_auth login|complete|status|verify` 与应用共享登录态。服务运行时在到期前五分钟自动准备重新授权会话，当前上游没有续期能力，用户仍须完成浏览器授权。分析接口仍需独立密钥，模拟交易仅显式调用。
+京东接口统一位于 `src/clients/jd_gold.py`，浏览器自动续约客户端位于 `src/clients/jd_browser_auth.py`，与 `src/repositories` 同层且互不依赖。`JDGoldGateway` 整合共享客户端、浏览器自动授权执行器和 SQLite 授权仓储；应用生命周期默认轮询全部 29 个公开参考行情品种（7 家银行积存金、京东指数、4 种国际贵金属、17 种上金所品种），最多 3 请求并发，每轮完成后等待配置周期，独立存储于 `DATA_DIR/references`，不构造双边报价、不接入交易决策。账户授权状态通过 contracts 层存储协议注入，由 `JDGoldAuthRepository` 保存到 `DATA_DIR/quant-agentic.sqlite3`；CLI `uv run python -m src.runtime.jd_auth login|complete|status|verify|renew` 与应用共享登录态。服务运行时在到期前 30 分钟（`JD_AUTO_RENEW_LEAD_SECONDS=1800`）自动准备重新授权会话并按配置通过 Playwright（优先连接本机 Chrome CDP，登录凭据由 `JD_LOGIN_USERNAME`/`JD_LOGIN_PASSWORD` 脱敏注入，遇验证码立即中止并降级人工授权）执行续约。分析接口仍需独立密钥，模拟交易仅显式调用。
 
 参考品种、单位及价格方向统一由 `ReferenceProductCatalog` 定义。`live_quotes_products: tuple[str, ...] | None` 对应 `LIVE_QUOTES_PRODUCTS=null`（默认全部）或 JSON 数组（后台子集）；未知品种启动报错。`GET /api/v1/quotes/live/products` 返回完整清单，原 `/live/latest`、`/live/status`、`/live/collect` 接口均支持 `product_code` 查询参数，默认 `CMBC-JCJ`。新增 `/live/latest/all`、`/live/status/all` 与 `POST /live/collect/all`，全量采集返回 `list[LiveQuoteStatus]`，单个品种失败不阻断其余品种。后台子集配置不限制手动全量或单品种采集。
 

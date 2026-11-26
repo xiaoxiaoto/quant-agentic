@@ -86,6 +86,11 @@ class FeatureEngine:
         horizon: HoldingPeriod = HoldingPeriod.W1,
     ) -> FeatureSet:
         """从历史报价序列与当前环境状态中提取全量特征向量。"""
+        as_of_utc = (
+            (as_of.astimezone(UTC) if as_of.tzinfo is not None else as_of.replace(tzinfo=UTC))
+            if as_of is not None
+            else None
+        )
         history_quotes = sorted(
             (
                 q
@@ -94,9 +99,23 @@ class FeatureEngine:
                 and math.isfinite(q.bid_price)
                 and math.isfinite(q.ask_price)
                 and 0 < q.bid_price <= q.ask_price
-                and (as_of is None or max(q.quote_at, q.received_at, q.available_at or q.received_at) <= as_of)
+                and (
+                    as_of_utc is None
+                    or max(
+                        q.quote_at.astimezone(UTC) if q.quote_at.tzinfo is not None else q.quote_at.replace(tzinfo=UTC),
+                        q.received_at.astimezone(UTC)
+                        if q.received_at.tzinfo is not None
+                        else q.received_at.replace(tzinfo=UTC),
+                        (q.available_at or q.received_at).astimezone(UTC)
+                        if (q.available_at or q.received_at).tzinfo is not None
+                        else (q.available_at or q.received_at).replace(tzinfo=UTC),
+                    )
+                    <= as_of_utc
+                )
             ),
-            key=lambda q: q.quote_at,
+            key=lambda q: (
+                q.quote_at.astimezone(UTC) if q.quote_at.tzinfo is not None else q.quote_at.replace(tzinfo=UTC)
+            ),
         )
         if not history_quotes:
             now_dt = as_of or self._now()
@@ -262,15 +281,26 @@ class IncrementalFeatureStream:
         intl_ref_cny: float | None = None,
     ) -> dict[HoldingPeriod, FeatureSet]:
         """追加单条按 PIT 到达的报价，并为多个持有期一次性提取共享特征向量。"""
+        as_of_utc = as_of.astimezone(UTC) if as_of.tzinfo is not None else as_of.replace(tzinfo=UTC)
+        q_at_utc = (
+            quote.quote_at.astimezone(UTC) if quote.quote_at.tzinfo is not None else quote.quote_at.replace(tzinfo=UTC)
+        )
+        q_rec_utc = (
+            quote.received_at.astimezone(UTC)
+            if quote.received_at.tzinfo is not None
+            else quote.received_at.replace(tzinfo=UTC)
+        )
+        q_avail = quote.available_at or quote.received_at
+        q_avail_utc = q_avail.astimezone(UTC) if q_avail.tzinfo is not None else q_avail.replace(tzinfo=UTC)
         is_valid = (
             quote.quality_state == DataQualityState.NORMAL
             and math.isfinite(quote.bid_price)
             and math.isfinite(quote.ask_price)
             and 0 < quote.bid_price <= quote.ask_price
-            and max(quote.quote_at, quote.received_at, quote.available_at or quote.received_at) <= as_of
+            and max(q_at_utc, q_rec_utc, q_avail_utc) <= as_of_utc
         )
         if is_valid:
-            ts = quote.quote_at.timestamp()
+            ts = q_at_utc.timestamp()
             if not self._quote_ts or ts >= self._quote_ts[-1]:
                 if self._quotes and not self._vol_dirty:
                     self._add_return_sample(self._quotes[-1], quote)

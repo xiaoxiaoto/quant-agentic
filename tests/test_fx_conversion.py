@@ -7,6 +7,7 @@ import httpx
 
 from src.clients.fx_rate import FXRateClient
 from src.clients.jd_gold import JDGoldClient
+from src.repositories.jd_collection import JDCollectionRepository
 from src.repositories.reference_quote import ReferenceQuoteRepository
 from src.services.market.live_quotes import LiveQuoteCollector
 
@@ -67,13 +68,16 @@ def test_live_quote_status_converts_usd_oz_and_cny_kg_to_cny_per_g(tmp_path: Pat
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
             fx = FXRateClient(http, primary_url="https://fx.test/usd", fallback_url="https://fx.test/usd")
+            store = JDCollectionRepository(tmp_path / "quant-agentic.sqlite3")
+            repository = ReferenceQuoteRepository(tmp_path)
             collector = LiveQuoteCollector(
                 JDGoldClient(http),
-                ReferenceQuoteRepository(tmp_path),
+                repository,
                 enabled=True,
                 interval_seconds=60,
                 stale_seconds=30,
                 fx_client=fx,
+                fx_repository=store,
             )
             await collector.collect_once("WG-XAUUSD")
             st_xau = collector.status("WG-XAUUSD")
@@ -81,6 +85,16 @@ def test_live_quote_status_converts_usd_oz_and_cny_kg_to_cny_per_g(tmp_path: Pat
             assert st_xau.latest.unit == "USD/oz"
             assert st_xau.fx_rate_usd_cny == 6.68
             assert st_xau.cny_per_g == round(3621.84 * 6.68 / 31.1034768, 2)
+
+            reopened = LiveQuoteCollector(
+                JDGoldClient(http),
+                repository,
+                enabled=False,
+                interval_seconds=60,
+                stale_seconds=30,
+                fx_repository=store,
+            )
+            assert reopened.status("WG-XAUUSD").cny_per_g == st_xau.cny_per_g
 
             await collector.collect_once("SGE-Ag(T+D)")
             st_ag = collector.status("SGE-Ag(T+D)")

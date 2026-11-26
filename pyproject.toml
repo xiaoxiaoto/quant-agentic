@@ -14,12 +14,19 @@ dependencies = [
     "jinja2>=3.1.6",
     "lightgbm>=4.7.0",
     "numpy>=2.5.5",
+    "playwright>=1.65.2",
     "pydantic-ai-slim[openai]>=2.70,<3",
     "pydantic-settings>=2.16.3",
     "scipy>=1.18.1",
     "sqlalchemy>=2.0,<2.1",
     "timesfm[torch]>=3.0.2,<4",
     "uvicorn>=0.54.0",
+]
+
+[project.optional-dependencies]
+qlib = [
+    "pandas>=2.2.0",
+    "pyqlib>=0.9.6",
 ]
 
 [tool.pytest.ini_options]

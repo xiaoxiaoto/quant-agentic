@@ -54,15 +54,16 @@ class RuntimeStateRepository:
         return "paper" if order.client_order_id.startswith("paper_") else "live"
 
     def _migrate_ledger_scope_column(self) -> None:
-        """为旧版订单表补充账本范围列，并将历史本地模拟盘订单迁出实盘辅助账本。"""
-        with self._engine.begin() as connection:
+        """为旧版订单表补充账本范围列与索引，并将历史本地模拟盘订单迁出实盘辅助账本。"""
+        with SQLiteDatabase.schema_lock(), SQLiteDatabase.write_session(self._engine) as session:
+            connection = session.connection()
             columns = {item["name"] for item in inspect(connection).get_columns(LedgerOrderRecord.__tablename__)}
-            if "scope" in columns:
-                return
-            connection.execute(text("ALTER TABLE ledger_orders ADD COLUMN scope TEXT NOT NULL DEFAULT 'live'"))
-            connection.execute(
-                text("UPDATE ledger_orders SET scope = 'paper' WHERE client_order_id LIKE 'paper\\_%' ESCAPE '\\'")
-            )
+            if "scope" not in columns:
+                session.execute(text("ALTER TABLE ledger_orders ADD COLUMN scope TEXT NOT NULL DEFAULT 'live'"))
+                session.execute(
+                    text("UPDATE ledger_orders SET scope = 'paper' WHERE client_order_id LIKE 'paper\\_%' ESCAPE '\\'")
+                )
+            session.execute(text("CREATE INDEX IF NOT EXISTS ix_ledger_orders_scope_seq ON ledger_orders (scope, seq)"))
 
     @staticmethod
     def _format_utc(dt: datetime) -> str:
@@ -89,7 +90,7 @@ class RuntimeStateRepository:
         if not kv_rows:
             return
 
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             if (
                 self._LEGACY_KEY_LEDGER_ORDERS in kv_rows
                 and session.execute(select(func.count()).select_from(LedgerOrderRecord)).scalar_one() == 0
@@ -125,6 +126,11 @@ class RuntimeStateRepository:
                 self._save_control_in_session(session, risk_state, kill_switch, None)
 
     def _upsert_order_in_session(self, session: Session, order: OrderEvent, *, scope: str = "live") -> None:
+        existing_scope = session.scalar(
+            select(LedgerOrderRecord.scope).where(LedgerOrderRecord.client_order_id == order.client_order_id)
+        )
+        if existing_scope is not None and existing_scope != scope:
+            raise ValueError(f"订单号 {order.client_order_id} 已归属其他账本范围（{existing_scope}）")
         raw_json = json.dumps(order.model_dump(mode="json"), ensure_ascii=False)
         stmt = insert(LedgerOrderRecord).values(
             scope=scope,
@@ -249,18 +255,18 @@ class RuntimeStateRepository:
 
     def upsert_order(self, order: OrderEvent, *, scope: str = "live") -> None:
         """增量写入或更新单笔影子账本订单记录。"""
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             self._upsert_order_in_session(session, order, scope=scope)
 
     def save_orders(self, orders: list[OrderEvent], *, scope: str = "live") -> None:
         """批量增量持久化影子账本成交订单列表。"""
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             for order in orders:
                 self._upsert_order_in_session(session, order, scope=scope)
 
     def clear_orders(self, *, scope: str = "live") -> None:
         """清空指定账本范围内持久化的影子账本订单记录。"""
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             session.execute(delete(LedgerOrderRecord).where(LedgerOrderRecord.scope == scope))
 
     def replace_orders(
@@ -272,7 +278,7 @@ class RuntimeStateRepository:
         interest_adjust_g: Decimal,
     ) -> None:
         """在同一事务中重写指定账本范围的全部订单与初始化元数据，确保重置操作原子性。"""
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             session.execute(delete(LedgerOrderRecord).where(LedgerOrderRecord.scope == scope))
             for order in orders:
                 self._upsert_order_in_session(session, order, scope=scope)
@@ -301,10 +307,20 @@ class RuntimeStateRepository:
                 return None
             return Decimal(row.initial_cash), Decimal(row.interest_adjust_g)
 
-    def load_alerts(self) -> list[AlertPayload]:
-        """读取持久化的交易提醒列表。"""
+    def load_alerts(self, *, limit: int | None = None) -> list[AlertPayload]:
+        """读取持久化的交易提醒列表；指定 limit 时优先返回最新记录。"""
         with Session(self._engine) as session:
-            rows = session.execute(select(AlertRecord.raw_json).order_by(AlertRecord.created_at)).scalars().all()
+            if limit is not None:
+                rows = list(
+                    session.execute(select(AlertRecord.raw_json).order_by(AlertRecord.created_at.desc()).limit(limit))
+                    .scalars()
+                    .all()
+                )
+                rows.reverse()
+            else:
+                rows = list(
+                    session.execute(select(AlertRecord.raw_json).order_by(AlertRecord.created_at)).scalars().all()
+                )
         try:
             return [AlertPayload.model_validate_json(raw) for raw in rows]
         except ValidationError as exc:
@@ -312,12 +328,12 @@ class RuntimeStateRepository:
 
     def upsert_alert(self, alert: AlertPayload) -> None:
         """增量写入或更新单条交易提醒。"""
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             self._upsert_alert_in_session(session, alert)
 
     def save_alerts(self, alerts: list[AlertPayload]) -> None:
         """批量增量持久化交易提醒列表。"""
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             for alert in alerts:
                 self._upsert_alert_in_session(session, alert)
 
@@ -332,12 +348,12 @@ class RuntimeStateRepository:
 
     def upsert_batch_instruction(self, instruction: BatchOrderInstruction) -> None:
         """增量写入或更新单条非交易时段批量挂单指令。"""
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             self._upsert_batch_in_session(session, instruction)
 
     def save_batch_instructions(self, instructions: list[BatchOrderInstruction]) -> None:
         """批量持久化非交易时段批量挂单指令列表。"""
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             for instruction in instructions:
                 self._upsert_batch_in_session(session, instruction)
 
@@ -357,7 +373,7 @@ class RuntimeStateRepository:
         last_signal_at: datetime | None = None,
     ) -> None:
         """持久化风控状态、Kill-Switch 急停标志与可选冷却时间。"""
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             self._save_control_in_session(session, risk_state, kill_switch_active, last_signal_at)
 
     def load_last_signal_at(self) -> datetime | None:
@@ -366,20 +382,32 @@ class RuntimeStateRepository:
             row = session.get(ControlStateRecord, self._DEFAULT_SCOPE)
         return self._parse_utc(row.last_signal_at) if row is not None else None
 
+    def save_kill_switch_state(self, kill_switch_active: bool) -> None:
+        """原子更新急停开关状态，保留当前风控状态与最近信号时间。"""
+        with SQLiteDatabase.write_session(self._engine) as session:
+            existing = session.get(ControlStateRecord, self._DEFAULT_SCOPE)
+            risk_state = RiskState(existing.risk_state) if existing is not None else RiskState.NORMAL
+            self._save_control_in_session(session, risk_state, kill_switch_active, None)
+
     def save_last_signal_at(self, signal_at: datetime) -> None:
         """更新最近一次交易信号触发时间，保留当前风控与急停状态。"""
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             existing = session.get(ControlStateRecord, self._DEFAULT_SCOPE)
             risk_state = RiskState(existing.risk_state) if existing is not None else RiskState.NORMAL
             kill_switch = bool(existing.kill_switch_active) if existing is not None else False
             self._save_control_in_session(session, risk_state, kill_switch, signal_at)
 
-    def load_news_events(self) -> list[NewsEvent]:
-        """读取持久化的新闻风控事件列表。"""
+    def load_news_events(self, *, limit: int | None = None, published_since: datetime | None = None) -> list[NewsEvent]:
+        """读取持久化的新闻风控事件，可按时间或条数限制范围。"""
+        stmt = select(NewsEventRecord.raw_json)
+        if published_since is not None:
+            stmt = stmt.where(NewsEventRecord.published_at >= self._format_utc(published_since))
+        if limit is not None:
+            stmt = stmt.order_by(NewsEventRecord.published_at.desc()).limit(limit)
+        else:
+            stmt = stmt.order_by(NewsEventRecord.published_at)
         with Session(self._engine) as session:
-            rows = (
-                session.execute(select(NewsEventRecord.raw_json).order_by(NewsEventRecord.published_at)).scalars().all()
-            )
+            rows = session.scalars(stmt).all()
         try:
             return [NewsEvent.model_validate_json(raw) for raw in rows]
         except ValidationError as exc:
@@ -396,7 +424,7 @@ class RuntimeStateRepository:
             confidence=event.confidence,
             raw_json=raw_json,
         )
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             session.execute(
                 stmt.on_conflict_do_update(
                     index_elements=[NewsEventRecord.event_id],
@@ -430,7 +458,7 @@ class RuntimeStateRepository:
             scheduled_at=self._format_utc(event.scheduled_at),
             raw_json=raw_json,
         )
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             session.execute(
                 stmt.on_conflict_do_update(
                     index_elements=[MacroEventRecord.event_id],
@@ -451,7 +479,7 @@ class RuntimeStateRepository:
             summary=report.summary,
             raw_json=raw_json,
         )
-        with Session(self._engine) as session, session.begin():
+        with SQLiteDatabase.write_session(self._engine) as session:
             session.execute(
                 stmt.on_conflict_do_update(
                     index_elements=[ReconciliationReportRecord.report_id],

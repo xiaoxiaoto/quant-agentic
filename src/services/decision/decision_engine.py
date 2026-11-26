@@ -138,11 +138,7 @@ class DecisionEngine:
             action = DecisionAction.HOLD
             reasons.append("NO_SIGNIFICANT_EDGE")
 
-        if (
-            action in (DecisionAction.BUY, DecisionAction.SELL)
-            and self._cooldown_seconds > 0
-            and last_signal_at is not None
-        ):
+        if action == DecisionAction.BUY and self._cooldown_seconds > 0 and last_signal_at is not None:
             now_utc = now_dt.astimezone(UTC) if now_dt.tzinfo is not None else now_dt.replace(tzinfo=UTC)
             last_utc = (
                 last_signal_at.astimezone(UTC)

@@ -10,6 +10,13 @@ class ModelSettings(BaseSettings):
     """数值预测模型、时序基础模型与新闻风险大模型配置。"""
 
     lightgbm_model_dir: str | None = None
+    predictor_backend: Literal["auto", "lightgbm", "qlib", "heuristic"] = "auto"
+    qlib_enabled: bool = False
+    qlib_provider_uri: str = "data/qlib_data"
+    qlib_external_provider_uri: str | None = None
+    qlib_region: str = "cn"
+    qlib_model_dir: str | None = None
+    qlib_experiment_dir: str = "data/qlib_experiments"
     timesfm_enabled: bool = True
     timesfm_checkpoint: str = "google/timesfm-3.0-pytorch"
     timesfm_device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
@@ -36,11 +43,11 @@ class ModelSettings(BaseSettings):
     )
 
     news_enabled: bool = Field(default=True, validation_alias=AliasChoices("news_enabled", "NEWS_ENABLED"))
-    news_sync_enabled: bool = False
+    news_sync_enabled: bool = True
     news_sync_interval_seconds: float = Field(default=300.0, ge=30.0, le=3600.0, allow_inf_nan=False)
     news_sync_page_size: int = Field(default=10, ge=1, le=50)
 
-    @field_validator("lightgbm_model_dir", mode="before")
+    @field_validator("lightgbm_model_dir", "qlib_external_provider_uri", "qlib_model_dir", mode="before")
     @classmethod
     def _normalize_empty_model_dir(cls, value: object) -> object:
         """将空白字符串环境变量归一化为 None。"""

@@ -302,13 +302,13 @@ def test_cancel_waits_for_persistence_and_memory_commit(tmp_path: Path) -> None:
                         await asyncio.sleep(0.001)
                 collecting.cancel()
                 await asyncio.sleep(0)
-                assert collector._lock.locked()
+                assert collector._product_locks["ICBC-JCJ"].locked()
                 assert collecting.done() is False
             finally:
                 release.set()
             with pytest.raises(asyncio.CancelledError):
                 await collecting
-            assert collector._lock.locked() is False
+            assert collector._product_locks["ICBC-JCJ"].locked() is False
             assert collector.status("ICBC-JCJ").records_saved == 1
             assert collector.latest("ICBC-JCJ") is not None
             assert collector.latest("ICBC-JCJ") == ReferenceQuoteRepository(tmp_path).latest("ICBC-JCJ")

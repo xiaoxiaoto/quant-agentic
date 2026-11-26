@@ -5,7 +5,6 @@ import type {
   JDHoldingsResponse,
   LiveQuoteStatus,
   LiveStatusResponse,
-  ModelStatusResponse,
   NewsOverviewResponse,
   ReferenceProduct,
 } from "../api/types";
@@ -17,10 +16,10 @@ import type { WorkspaceTab } from "./WorkspaceNav";
 interface OverviewViewProps {
   liveStatus: LiveStatusResponse | null;
   jdHoldings: JDHoldingsResponse | null;
-  jdHoldingsError: string | null;
+  jdHoldingsMessage: string | null;
+  holdingsConfirmedAt: string | null;
   liveFailed: boolean;
   quotesFailed: boolean;
-  modelStatus: ModelStatusResponse | null;
   newsOverview: NewsOverviewResponse | null;
   products: ReferenceProduct[];
   quoteStatuses: LiveQuoteStatus[];
@@ -38,10 +37,11 @@ interface OverviewViewProps {
   onExecuteAlert: (
     id: string,
     payload: { filled_grams: number; filled_price: number; fee?: number; bank_order_id?: string }
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   onReconcileJd: () => void;
   onStepPaper: () => void;
-  onSyncNews: () => void;
+  onRefresh: () => void;
+  refreshing: boolean;
 }
 
 const CORE_QUOTES = [
@@ -90,10 +90,10 @@ function LatestEvaluation({ evaluation }: { evaluation: Evaluation | null }) {
 }
 
 export function OverviewView({
-  liveStatus, jdHoldings, jdHoldingsError, liveFailed, quotesFailed, modelStatus, newsOverview,
+  liveStatus, jdHoldings, jdHoldingsMessage, holdingsConfirmedAt, liveFailed, quotesFailed, newsOverview,
   products, quoteStatuses, alerts, alertsLoaded, alertsFailed, evaluation, focusAlertId, onAlertFocused,
   busyAction, onNavigate, onEvaluateLive, onConfirmAlert, onDeclineAlert, onExecuteAlert,
-  onReconcileJd, onStepPaper, onSyncNews,
+  onReconcileJd, onStepPaper, onRefresh, refreshing,
 }: OverviewViewProps) {
   const statusMap = new Map(quoteStatuses.map((status) => [status.product_code, status]));
   const productMap = new Map(products.map((product) => [product.code, product]));
@@ -208,8 +208,8 @@ export function OverviewView({
               <button type="button" onClick={onStepPaper} disabled={busyAction !== null} className="secondary-button">
                 <Play className="size-4" />{busyAction === "paper-step" ? "模拟中…" : "运行一次本地模拟盘"}
               </button>
-              <button type="button" onClick={onSyncNews} disabled={busyAction !== null || !modelStatus?.news_llm?.enabled} className="secondary-button">
-                <Newspaper className="size-4" />{busyAction === "news-sync" ? "同步中…" : "同步黄金资讯"}
+              <button type="button" onClick={onRefresh} disabled={refreshing} className="secondary-button">
+                <Newspaper className="size-4" />{refreshing ? "读取中…" : "刷新资讯"}
               </button>
             </div>
           </details>
@@ -228,7 +228,8 @@ export function OverviewView({
                 <dt className="text-xs text-slate-400">京东实盘持仓</dt>
                 <dd className="mt-1 text-lg font-medium tabular-nums">
                   {jdHoldings ? `${jdHoldings.totalGramAll.toFixed(4)} 克` : "—"}
-                  {jdHoldingsError && <span className="mt-1 block text-xs text-amber-200">{jdHoldings ? "持仓更新失败，显示上次数据" : "持仓读取失败"}</span>}
+                  {jdHoldingsMessage && <span className="mt-1 block text-xs text-amber-200">{jdHoldingsMessage}</span>}
+                  {holdingsConfirmedAt && <time className="mt-1 block text-xs text-slate-400" dateTime={holdingsConfirmedAt}>{formatBeijingTime(holdingsConfirmedAt)}</time>}
                 </dd>
               </div>
               <div className="border-l border-white/10 pl-3">

@@ -94,15 +94,18 @@ class PaperTradingService:
                 and ref.price > 0
                 and ref.quality_state != DataQualityState.ANOMALY
             ):
-                candidate = self.build_synthetic_quote(
-                    ref,
-                    product_code=product_code,
-                    spread_pct=self._synthetic_spread_pct,
-                    as_of=as_of,
-                )
-                if synthetic_quote is None or self._visible_at(candidate) > self._visible_at(synthetic_quote):
-                    self._quotes.save_quote(candidate)
-                    synthetic_quote = candidate
+                ref_visible = ref.available_at or ref.received_at
+                ref_visible_utc = ref_visible.astimezone(UTC) if ref_visible.tzinfo else ref_visible.replace(tzinfo=UTC)
+                as_of_utc = as_of.astimezone(UTC) if as_of.tzinfo else as_of.replace(tzinfo=UTC)
+                if ref_visible_utc <= as_of_utc:
+                    candidate = self.build_synthetic_quote(
+                        ref,
+                        product_code=product_code,
+                        spread_pct=self._synthetic_spread_pct,
+                    )
+                    if synthetic_quote is None or self._visible_at(candidate) > self._visible_at(synthetic_quote):
+                        self._quotes.save_quote(candidate)
+                        synthetic_quote = candidate
 
         if real_quote is None:
             return synthetic_quote
@@ -125,7 +128,9 @@ class PaperTradingService:
         if ref.quality_state == DataQualityState.ANOMALY:
             return None
         visible_at = ref.available_at or ref.received_at
-        if visible_at > as_of:
+        visible_utc = visible_at.astimezone(UTC) if visible_at.tzinfo else visible_at.replace(tzinfo=UTC)
+        as_of_utc = as_of.astimezone(UTC) if as_of.tzinfo else as_of.replace(tzinfo=UTC)
+        if visible_utc > as_of_utc:
             return None
         return ref.price
 
@@ -160,8 +165,15 @@ class PaperTradingService:
         source_time = reference.quote_at or reference.received_at
         effective_received = reference.received_at
         if as_of is not None:
-            source_time = min(source_time, as_of)
-            effective_received = min(effective_received, as_of)
+            source_utc = source_time.astimezone(UTC) if source_time.tzinfo else source_time.replace(tzinfo=UTC)
+            received_utc = (
+                effective_received.astimezone(UTC)
+                if effective_received.tzinfo
+                else effective_received.replace(tzinfo=UTC)
+            )
+            as_of_utc = as_of.astimezone(UTC) if as_of.tzinfo else as_of.replace(tzinfo=UTC)
+            if source_utc > as_of_utc or received_utc > as_of_utc:
+                raise ValueError("参考行情时间晚于回放时间点，禁止构造前视合成报价")
         return QuoteRaw(
             quote_id=f"syn_{reference.product_code}_{reference.quote_id}",
             source_id=f"SYNTHETIC_{reference.product_code}",

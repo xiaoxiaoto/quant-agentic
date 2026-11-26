@@ -105,15 +105,15 @@ class QuoteRecorder:
             quality_state=DataQualityState.NORMAL,
         )
 
-        quality_state = self._guard.validate_and_classify(quote, now=received_at)
-        quote.quality_state = quality_state
-        derived = self._derive_metrics(quote, intl_ref_cny)
-
         with self._lock:
+            quality_state = self._guard.validate_and_classify(quote, now=received_at)
+            quote.quality_state = quality_state
+            derived = self._derive_metrics(quote, intl_ref_cny)
             if quality_state == DataQualityState.NORMAL:
                 quote.available_at = received_at
-                self._latest_quote = quote
-                self._latest_derived = derived
+                if self._latest_quote is None or quote.quote_at >= self._latest_quote.quote_at:
+                    self._latest_quote = quote
+                    self._latest_derived = derived
             else:
                 self._total_anomalies += 1
 

@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from src.contracts.domains.event import MacroCalendarEvent, NewsEvent
+from src.contracts.domains.jd_collection import JDNewsArticle
 from src.contracts.enums.trading import HoldingPeriod
 
 
@@ -46,6 +47,7 @@ class NewsOverviewResponse(BaseModel):
     lock_reason: str | None = Field(default=None, description="锁定原因说明")
     active_risk_flags: list[str] = Field(default_factory=list, description="当前生效的新闻与宏观风控标志")
     news_events: list[NewsEvent] = Field(default_factory=list, description="按时间倒序排列的结构化新闻风险事件")
+    jd_articles: list[JDNewsArticle] = Field(default_factory=list, description="已采集的京东原始资讯")
     macro_events: list[MacroCalendarEvent] = Field(default_factory=list, description="已登记的重大宏观经济日程")
 
 
