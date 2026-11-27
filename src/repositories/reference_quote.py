@@ -13,6 +13,7 @@ from sqlalchemy import desc, select, text
 from sqlalchemy.orm import Session
 
 from src.contracts.domains.reference_quote import ReferenceQuote
+from src.contracts.enums.trading import DataQualityState
 from src.repositories.database import ReferenceQuoteImportRecord, ReferenceQuoteRecord, SQLiteDatabase
 
 
@@ -267,11 +268,21 @@ class ReferenceQuoteRepository:
         start_time: datetime | None = None,
         end_time: datetime | None = None,
         limit: int | None = 500,
+        valid_only: bool = False,
     ) -> list[ReferenceQuote]:
         """按时间区间查询已入库的单品种参考行情历史序列；传入 limit=None 返回区间全量序列。"""
+        if limit is not None and limit < 0:
+            raise ValueError("limit 不能为负数")
+        if limit == 0:
+            return []
         if self._import_jsonl_on_read:
             self._sync_jsonl_files()
         stmt = select(ReferenceQuoteRecord.raw_json).where(ReferenceQuoteRecord.product_code == product_code)
+        if valid_only:
+            stmt = stmt.where(
+                ReferenceQuoteRecord.quote_at_utc.is_not(None),
+                ReferenceQuoteRecord.quality_state == DataQualityState.NORMAL.value,
+            )
         if start_time is not None:
             stmt = stmt.where(ReferenceQuoteRecord.received_at_utc >= self._format_utc(start_time))
         if end_time is not None:

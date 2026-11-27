@@ -8,11 +8,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from math import isfinite
 from threading import RLock
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from src.contracts.domains.account import AccountSnapshot, OrderEvent
 from src.contracts.domains.product import FeeRule
 from src.contracts.enums.trading import OrderState, TradeDirection
+from src.contracts.schemas.trading import FifoLotItem, FifoSummaryResponse
 from src.repositories.runtime_state import RuntimeStateRepository
 
 
@@ -615,3 +617,134 @@ class ShadowLedger:
             return float(self._round_cash(daily_realized + unrealized)), float(
                 self._round_cash(weekly_realized + unrealized)
             )
+
+    def compute_fifo_lots(
+        self,
+        reference_price: float | None = None,
+        *,
+        only_open: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> FifoSummaryResponse:
+        """按先进先出（FIFO）撮合全部历史订单，核算在持批次、剩余克重及当前浮盈。"""
+        if offset < 0:
+            raise ValueError("offset 不能为负数")
+        if limit is not None and limit < 0:
+            raise ValueError("limit 不能为负数")
+
+        with self._lock:
+            orders = list(self._order_history)
+
+        buy_lots: list[tuple[int, Decimal, Decimal, Decimal | None, Decimal]] = []
+        enriched: list[FifoLotItem] = []
+        head = 0
+
+        for idx, order in enumerate(orders):
+            is_filled = order.filled_grams is not None and order.filled_grams > 0
+            initial_status: Literal["HOLDING", "PARTIAL", "CLOSED", "SELL", "UNFILLED"] = (
+                "UNFILLED" if not is_filled else ("HOLDING" if order.direction == TradeDirection.BUY else "SELL")
+            )
+
+            ts_val = order.bank_event_at or order.received_at
+            ts_str = ts_val.isoformat() if ts_val is not None else None
+
+            enriched.append(
+                FifoLotItem(
+                    client_order_id=order.client_order_id,
+                    bank_order_id=order.bank_order_id,
+                    direction=order.direction,
+                    lot_status=initial_status,
+                    requested_grams=float(order.requested_grams),
+                    filled_grams=float(order.filled_grams) if order.filled_grams is not None else None,
+                    remaining_grams=0.0,
+                    execution_price=float(order.execution_price) if order.execution_price is not None else None,
+                    fee=float(order.fee) if order.fee is not None else None,
+                    lot_pnl=None,
+                    timestamp=ts_str,
+                )
+            )
+
+            if not is_filled or order.filled_grams is None:
+                continue
+
+            filled_g = self._round_gold(Decimal(str(order.filled_grams)))
+            if order.direction == TradeDirection.BUY:
+                exec_price = Decimal(str(order.execution_price)) if order.execution_price is not None else None
+                buy_fee = self._round_cash(Decimal(str(order.fee or 0.0)))
+                buy_lots.append((idx, filled_g, filled_g, exec_price, buy_fee))
+            elif order.direction == TradeDirection.SELL:
+                need = filled_g
+                while head < len(buy_lots) and need > Decimal("0.0"):
+                    lot_idx, lot_filled, lot_rem, lot_price, lot_fee = buy_lots[head]
+                    if lot_rem <= Decimal("0.0"):
+                        head += 1
+                        continue
+                    take = min(lot_rem, need)
+                    new_rem = self._round_gold(lot_rem - take)
+                    if new_rem <= Decimal("0.0"):
+                        new_rem = Decimal("0.0")
+                        buy_lots[head] = (lot_idx, lot_filled, new_rem, lot_price, lot_fee)
+                        head += 1
+                    else:
+                        buy_lots[head] = (lot_idx, lot_filled, new_rem, lot_price, lot_fee)
+                    need = self._round_gold(need - take)
+                    if need <= Decimal("0.0"):
+                        break
+
+        open_cost = Decimal("0.0")
+        open_g = Decimal("0.0")
+        open_lot_count = 0
+        ref_dec = (
+            Decimal(str(reference_price))
+            if reference_price is not None and isfinite(reference_price) and reference_price > 0
+            else None
+        )
+
+        for lot_idx, lot_filled, lot_rem, lot_price, lot_fee in buy_lots:
+            if lot_rem <= Decimal("0.0"):
+                status: Literal["HOLDING", "PARTIAL", "CLOSED", "SELL", "UNFILLED"] = "CLOSED"
+            elif lot_rem < lot_filled:
+                status = "PARTIAL"
+            else:
+                status = "HOLDING"
+
+            lot_pnl: float | None = None
+            if lot_rem > Decimal("0.0"):
+                open_lot_count += 1
+                open_g += lot_rem
+                if lot_price is not None:
+                    alloc_fee = (lot_fee * lot_rem / lot_filled) if lot_filled > Decimal("0.0") else Decimal("0.0")
+                    lot_cost = lot_rem * lot_price + alloc_fee
+                    open_cost += lot_cost
+                    if ref_dec is not None:
+                        lot_pnl = float(self._round_cash(lot_rem * ref_dec - lot_cost))
+
+            enriched[lot_idx] = enriched[lot_idx].model_copy(
+                update={
+                    "remaining_grams": float(lot_rem),
+                    "lot_status": status,
+                    "lot_pnl": lot_pnl,
+                }
+            )
+
+        reversed_items = list(reversed(enriched))
+        filtered = (
+            [item for item in reversed_items if item.lot_status in ("HOLDING", "PARTIAL")]
+            if only_open
+            else reversed_items
+        )
+
+        if limit == 0:
+            paged: list[FifoLotItem] = []
+        elif limit is not None:
+            paged = filtered[offset : offset + limit]
+        else:
+            paged = filtered[offset:]
+
+        return FifoSummaryResponse(
+            open_position_cost=float(self._round_cash(open_cost)),
+            open_grams=float(self._round_gold(open_g)),
+            open_lot_count=open_lot_count,
+            total_orders=len(enriched),
+            items=paged,
+        )

@@ -188,3 +188,45 @@ postman simulation run postman/simulations/jd-live.sim.yaml --port 4010 --output
 ```
 
 将 `JD_LATEST_PRICE_URL` 指向 `http://127.0.0.1:4010/jd/latestPrice` 后启动应用；向 `http://127.0.0.1:4010/jd/control/error`、`/control/invalid`、`/control/slow`、`/control/stale` 或 `/control/normal` 发送 POST 可切换故障。`slow` 延迟 2 秒，验证超时时将 `JD_TIMEOUT_SECONDS` 设为 1。模拟器仅建模公开单价接口，不表示真实平台的可用性或错误响应保证。
+
+## 外部黄金 K 线增量入库
+
+```bash
+uv run python -m src.runtime.external_bars
+uv run python -m src.runtime.external_bars --source dukascopy --start 2025-01-01 --end 2025-02-01
+```
+
+默认同步上金所、Dukascopy 和 HistData。无日期参数时按各来源、品种和周期从已有数据继续，首次同步从 2024 年开始抓取国际现货，国内现货按上游可用范围回填。显式日期区间用于补历史或重跑，结束日期不含当天。国内日线使用北京时间交易日，其余用 UTC 日期。
+
+| 品种 | 来源参数及入库标识 | 周期 |
+|---|---|---|
+| `SGE-Au99.99`（CNY/g） | `sge_daily` | 日线 |
+| `WG-XAUUSD`（USD/oz） | `dukascopy`，分别入库为 `dukascopy_bid` 和 `dukascopy_ask` | 1、5、15、30、60 分钟 |
+| `WG-XAUUSD`（USD/oz） | `histdata`，入库为 `histdata_bid` | 1、5、15、30、60 分钟 |
+
+命令写入应用 SQLite 的 `market_kline_bars`。按品种、来源、周期、UTC 时间去重，报告各周期新增或修订数量和异常 OHLC 数量。分钟线只有集齐同一时间桶的全部分钟后才生成上层周期。部分来源失败时已提交数据仍可查询，命令以非零状态报告失败。
+
+`GET /api/v1/quotes/bars/kline` 可按 `product_code`、`source`、`interval` 和时间范围查询。Qlib 的 `--kline-source` 可选择指定来源。
+
+```bash
+uv run python -m src.runtime.qlib_research export --source kline --instruments SGE-Au99.99 --freq day --kline-interval day --kline-source sge_daily
+```
+
+### 合并 XAUUSD 行情
+
+查询 `GET /api/v1/quotes/bars/kline?product_code=WG-XAUUSD&interval=m60` 默认返回合并行情。支持 1、5、15、30、60 分钟和日线，从原始记录即时生成。响应中的 `source` 为 `xauusd_merged`，`origin_source` 标注实际选用的数据源。指定 `source` 可查询原始行情，京东的周线和月线可用 `source=jd_public_kline` 查询。
+
+分钟和小时按 UTC 对齐，优先选 Dukascopy 买价的整根柱，缺柱时用 HistData 买价。日线按纽约交易日归并，前一日 18:00 开始，当日 17:00 收盘。优先用 Dukascopy 单源完整会话，再用 HistData 单源完整会话，最后用收盘后采集到的京东日线。京东历史日线的可用时间按纽约收盘估算。换源时保留各源原价。
+
+```bash
+uv run python -m src.runtime.qlib_research export --source kline --instruments WG-XAUUSD --freq day --output-dir data/qlib_xauusd_day
+uv run python -m src.runtime.qlib_research export --source kline --instruments WG-XAUUSD --freq 1h --output-dir data/qlib_xauusd_hour
+```
+
+合并导出的周期随 `--freq` 选择。Qlib 的 `origin_source` 字段中，1 为 Dukascopy，2 为 HistData，3 为京东。
+
+也可将 `--freq` 设为 `1min`、`5min`、`15min` 或 `30min` 导出对应的合并分钟线，导出覆盖库中的完整历史。项目的训练命令目前提供日频和小时频。
+
+```bash
+uv run python -m src.runtime.qlib_research export --source kline --freq 1min --output-dir data/qlib_xauusd_1min
+```

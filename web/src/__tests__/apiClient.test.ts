@@ -44,4 +44,63 @@ describe("api client contracts", () => {
 
     await expect(api.getJdHoldings()).rejects.toThrow("京东账户尚未授权");
   });
+
+  it("getKLines 按品种与周期正确设置 source 查询参数", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+    const controller = new AbortController();
+
+    await api.getKLines("WG-XAUUSD", "m5", controller.signal, 240);
+    await api.getKLines("WG-XAUUSD", "week", controller.signal, 240);
+    await api.getKLines("CMBC-JCJ", "day", controller.signal, 100);
+    await api.getQuoteHistory("CMBC-JCJ", controller.signal);
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/quotes/bars/kline?product_code=WG-XAUUSD&interval=m5&limit=240");
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      "/api/v1/quotes/bars/kline?product_code=WG-XAUUSD&interval=week&limit=240&source=jd_public_kline"
+    );
+    expect(fetchMock.mock.calls[2][0]).toBe(
+      "/api/v1/quotes/bars/kline?product_code=CMBC-JCJ&interval=day&limit=100&source=jd_public_kline"
+    );
+    expect(fetchMock.mock.calls[3][0]).toBe("/api/v1/quotes/live/history?product_code=CMBC-JCJ");
+  });
+
+  it("TimesFM 与 Qlib 工作流接口路由与请求方法正确", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+
+    await api.getTimesfmStatus();
+    await api.prepareTimesfm({ source_mode: "kline", freq: "1h" });
+    await api.trainTimesfm({ experiment_name: "exp1" });
+    await api.backtestTimesfm({ run_id: "r1" });
+    await api.exportTimesfm({ run_id: "r1", output_model_dir: "models/timesfm/v1" });
+    await api.getQlibStatus();
+    await api.exportQlib({ source_mode: "kline", freq: "day" });
+    await api.evaluateQlibFactors({ factor_preset: "au9999_timing" });
+    await api.trainQlib({ experiment_name: "q1" });
+    await api.backtestQlib({ instrument: "SGE-Au99.99" });
+    await api.generateQlibSignal({ instrument: "SGE-Au99.99" });
+
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? "GET"])).toEqual([
+      ["/api/v1/timesfm/status", "GET"],
+      ["/api/v1/timesfm/prepare", "POST"],
+      ["/api/v1/timesfm/train", "POST"],
+      ["/api/v1/timesfm/backtest", "POST"],
+      ["/api/v1/timesfm/export", "POST"],
+      ["/api/v1/qlib/status", "GET"],
+      ["/api/v1/qlib/export", "POST"],
+      ["/api/v1/qlib/factors/evaluate", "POST"],
+      ["/api/v1/qlib/train", "POST"],
+      ["/api/v1/qlib/backtest", "POST"],
+      ["/api/v1/qlib/signal", "POST"],
+    ]);
+  });
 });

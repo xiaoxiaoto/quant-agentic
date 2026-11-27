@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import ClassVar, Literal
 
 from src.contracts.domains.product import FeeRule
-from src.contracts.domains.qlib import QlibFactorSpec
+from src.contracts.domains.qlib import QlibFactorPreset, QlibFactorSpec, QlibLabelMode
 from src.contracts.enums.trading import HoldingPeriod
 
 
@@ -116,6 +116,36 @@ class QlibFactorLibrary:
         ]
 
     @classmethod
+    def _au9999_timing_specs(cls) -> list[QlibFactorSpec]:
+        """精选 Au99.99 单品种择时 16 因子（趋势动量 + 波动突破 + 外盘/宏观驱动，剔除成交量噪音）。"""
+        return [
+            QlibFactorSpec(name="roc_5", expression="Ref($close, 5) / $close - 1", description="5 日动量变化率"),
+            QlibFactorSpec(name="roc_20", expression="Ref($close, 20) / $close - 1", description="20 日动量变化率"),
+            QlibFactorSpec(name="ma_5", expression="Mean($close, 5) / $close - 1", description="5 日均线偏离度"),
+            QlibFactorSpec(name="ma_20", expression="Mean($close, 20) / $close - 1", description="20 日均线偏离度"),
+            QlibFactorSpec(name="beta_10", expression="Slope($close, 10) / $close", description="10 日线性趋势斜率"),
+            QlibFactorSpec(name="rsqr_10", expression="Rsquare($close, 10)", description="10 日线性趋势拟合度"),
+            QlibFactorSpec(name="beta_20", expression="Slope($close, 20) / $close", description="20 日线性趋势斜率"),
+            QlibFactorSpec(name="rsqr_20", expression="Rsquare($close, 20)", description="20 日线性趋势拟合度"),
+            QlibFactorSpec(name="std_10", expression="Std($close, 10) / $close", description="10 日相对波动率"),
+            QlibFactorSpec(name="std_20", expression="Std($close, 20) / $close", description="20 日相对波动率"),
+            QlibFactorSpec(name="klen", expression="($high - $low) / $open", description="日内振幅占比"),
+            QlibFactorSpec(
+                name="rsv_20",
+                expression="($close - Min($low, 20)) / (Max($high, 20) - Min($low, 20) + 1e-12)",
+                description="20 日价格通道突破位置 RSV",
+            ),
+            QlibFactorSpec(name="xau_ret", expression="$xau_ret", description="隔夜伦敦金 XAUUSD 收益率（PIT 对齐）"),
+            QlibFactorSpec(name="usdcny_ret", expression="$usdcny_ret", description="美元兑人民币日收益率（PIT 对齐）"),
+            QlibFactorSpec(name="dxy_ret", expression="$dxy_ret", description="美元指数 DXY 日收益率（PIT 对齐）"),
+            QlibFactorSpec(
+                name="us10y_diff",
+                expression="$us10y_diff",
+                description="10 年期美债收益率日变动（PIT 对齐）",
+            ),
+        ]
+
+    @classmethod
     def horizon_steps(cls, horizon: HoldingPeriod, freq: Literal["1h", "day"]) -> int:
         """返回目标持有期在给定数据频率下的前瞻步数。"""
         table = cls._HORIZON_STEPS_1H if freq == "1h" else cls._HORIZON_STEPS_DAY
@@ -124,7 +154,7 @@ class QlibFactorLibrary:
     @classmethod
     def get_factors(
         cls,
-        preset: Literal["gold_core", "alpha158_lite", "custom"],
+        preset: QlibFactorPreset,
         *,
         freq: Literal["1h", "day"],
         custom_expressions: dict[str, str] | None = None,
@@ -134,6 +164,8 @@ class QlibFactorLibrary:
             return cls._gold_core_specs(freq)
         if preset == "alpha158_lite":
             return cls._alpha158_lite_specs()
+        if preset == "au9999_timing":
+            return cls._au9999_timing_specs()
         if not custom_expressions:
             raise ValueError("custom 因子预设必须提供至少一个自定义表达式")
         return [
@@ -151,9 +183,12 @@ class QlibFactorLibrary:
         fee_rule: FeeRule,
         source_type: Literal["local_sqlite", "external_qlib"],
         spread_pct: float = 0.002,
+        label_mode: QlibLabelMode = "net",
     ) -> str:
-        """构造扣除双边点差与买卖手续费的前瞻净收益标签表达式。"""
+        """构造扣除双边点差与买卖手续费的前瞻净收益标签表达式，或原始毛收益标签表达式。"""
         step = cls.horizon_steps(horizon, freq)
+        if label_mode == "gross":
+            return f"(Ref($close, -{step}) / $close - 1)"
         buy_mult = 1.0 + fee_rule.buy_fee_rate
         sell_mult = 1.0 - fee_rule.sell_fee_rate
         if source_type == "local_sqlite":

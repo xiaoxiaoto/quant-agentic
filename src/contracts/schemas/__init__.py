@@ -44,6 +44,12 @@ from src.contracts.schemas.model import (
     WalkForwardFoldReport as WalkForwardFoldReport,
 )
 from src.contracts.schemas.qlib import (
+    QlibBacktestReport as QlibBacktestReport,
+)
+from src.contracts.schemas.qlib import (
+    QlibBacktestRequest as QlibBacktestRequest,
+)
+from src.contracts.schemas.qlib import (
     QlibExperimentListResponse as QlibExperimentListResponse,
 )
 from src.contracts.schemas.qlib import (
@@ -57,6 +63,12 @@ from src.contracts.schemas.qlib import (
 )
 from src.contracts.schemas.qlib import (
     QlibFactorEvaluateRequest as QlibFactorEvaluateRequest,
+)
+from src.contracts.schemas.qlib import (
+    QlibSignalRequest as QlibSignalRequest,
+)
+from src.contracts.schemas.qlib import (
+    QlibSignalResponse as QlibSignalResponse,
 )
 from src.contracts.schemas.qlib import (
     QlibStatusResponse as QlibStatusResponse,
@@ -78,6 +90,42 @@ from src.contracts.schemas.reconciliation import (
 )
 from src.contracts.schemas.reconciliation import (
     SnapshotReconcileResponse as SnapshotReconcileResponse,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMBacktestReport as TimesFMBacktestReport,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMBacktestRequest as TimesFMBacktestRequest,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMExperimentListResponse as TimesFMExperimentListResponse,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMExportReport as TimesFMExportReport,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMExportRequest as TimesFMExportRequest,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMFullPipelineReport as TimesFMFullPipelineReport,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMFullPipelineRequest as TimesFMFullPipelineRequest,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMPrepareReport as TimesFMPrepareReport,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMPrepareRequest as TimesFMPrepareRequest,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMStatusResponse as TimesFMStatusResponse,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMTrainReport as TimesFMTrainReport,
+)
+from src.contracts.schemas.timesfm_multifactor import (
+    TimesFMTrainRequest as TimesFMTrainRequest,
 )
 from src.contracts.schemas.trading import (
     AlertExecuteRequest as AlertExecuteRequest,

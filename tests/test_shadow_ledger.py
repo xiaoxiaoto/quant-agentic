@@ -1,5 +1,7 @@
 """影子账本核心业务逻辑测试。"""
 
+from typing import cast
+
 import pytest
 
 from src.contracts.domains.product import FeeRule
@@ -193,3 +195,65 @@ def test_reset_and_seed_holdings(tmp_path: object) -> None:
             initial_cash=5000.0,
             holdings=[("CMBC", 10.0, 600.0)],
         )
+
+
+def test_compute_fifo_lots() -> None:
+    ledger = ShadowLedger(initial_cash=100000.0)
+    # 批次 1: 买入 10g @ 500
+    ledger.record_buy("buy_1", 10.0, 500.0)
+    # 批次 2: 买入 5g @ 600
+    ledger.record_buy("buy_2", 5.0, 600.0)
+    # 批次 3: 卖出 12g @ 700 (应撮合掉全部 buy_1 的 10g，以及 buy_2 的 2g)
+    ledger.record_sell("sell_1", 12.0, 700.0)
+
+    # 重估金价 750
+    res = ledger.compute_fifo_lots(reference_price=750.0)
+    assert res.total_orders == 3
+    assert res.open_lot_count == 1
+    assert res.open_grams == 3.0
+    # 剩余 3g buy_2，买入价 600，在持成本 = 1800.0
+    assert res.open_position_cost == 1800.0
+
+    items = res.items
+    # 倒序排列，第一个是 sell_1
+    assert items[0].client_order_id == "sell_1"
+    assert items[0].lot_status == "SELL"
+
+    # 第二个是 buy_2，状态 PARTIAL，剩余 3g，浮盈 (750 - 600) * 3 = 450.0
+    assert items[1].client_order_id == "buy_2"
+    assert items[1].lot_status == "PARTIAL"
+    assert items[1].remaining_grams == 3.0
+    assert items[1].lot_pnl == 450.0
+
+    # 第三个是 buy_1，状态 CLOSED，剩余 0g
+    assert items[2].client_order_id == "buy_1"
+    assert items[2].lot_status == "CLOSED"
+    assert items[2].remaining_grams == 0.0
+
+    # 仅查看在持批次
+    only_open_res = ledger.compute_fifo_lots(reference_price=750.0, only_open=True)
+    assert len(only_open_res.items) == 1
+    assert only_open_res.items[0].client_order_id == "buy_2"
+
+
+def test_compute_fifo_lots_fee_allocation_and_pagination_bounds() -> None:
+    """验证 FIFO 批次按剩余比例分摊买入手续费，并严格校验分页边界。"""
+    ledger = ShadowLedger(initial_cash=100000.0, fee_rule=FeeRule(buy_fee_rate=0.01, sell_fee_rate=0.0))
+    # 买入 10g @ 500，买入手续费 50.0
+    ledger.record_buy("buy_fee", 10.0, 500.0)
+    # 卖出 4g @ 600，剩余 6g 应分摊 30.0 手续费，在持成本 = 3000 + 30 = 3030.0
+    ledger.record_sell("sell_part", 4.0, 600.0)
+
+    res = ledger.compute_fifo_lots(reference_price=600.0, only_open=True)
+    assert res.open_grams == 6.0
+    assert res.open_position_cost == 3030.0
+    assert res.items[0].lot_pnl == 570.0  # 6 * 600 - 3030
+
+    # limit == 0 必须返回空列表
+    assert ledger.compute_fifo_lots(limit=0).items == []
+
+    # 负 offset / 负 limit 抛 ValueError
+    with pytest.raises(ValueError, match="offset"):
+        ledger.compute_fifo_lots(offset=-1)
+    with pytest.raises(ValueError, match="limit"):
+        ledger.compute_fifo_lots(limit=-1)

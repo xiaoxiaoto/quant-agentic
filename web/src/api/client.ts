@@ -2,10 +2,13 @@ import type {
   AccountSnapshot,
   AlertPayload,
   BacktestSummary,
+  FifoSummaryResponse,
   JDAuthActionResponse,
   JDAuthLoginResponse,
   JDAuthStatusResponse,
   JDHoldingsSnapshot,
+  KLineBar,
+  KLineInterval,
   LiveQuoteStatus,
   LiveStatusResponse,
   LiveStepResult,
@@ -14,9 +17,31 @@ import type {
   NewsOverviewResponse,
   OrderEvent,
   PaperStepResult,
+  QlibBacktestReport,
+  QlibBacktestRequest,
+  QlibExperimentListResponse,
+  QlibExportReport,
+  QlibExportRequest,
+  QlibFactorEvaluateReport,
+  QlibFactorEvaluateRequest,
+  QlibSignalRequest,
+  QlibSignalResponse,
+  QlibStatusResponse,
+  QlibTrainReport,
+  QlibTrainRequest,
   ReconciliationReport,
   ReferenceProduct,
   SnapshotReconcileResponse,
+  TimesFMBacktestReport,
+  TimesFMBacktestRequest,
+  TimesFMExperimentListResponse,
+  TimesFMExportReport,
+  TimesFMExportRequest,
+  TimesFMPrepareReport,
+  TimesFMPrepareRequest,
+  TimesFMStatusResponse,
+  TimesFMTrainReport,
+  TimesFMTrainRequest,
   TrainingPipelineReport,
 } from "./types";
 
@@ -78,6 +103,16 @@ export const api = {
 
   getReferenceProducts: (signal?: AbortSignal) => request<ReferenceProduct[]>("/api/v1/quotes/live/products", { signal }),
   getAllQuoteStatuses: (signal?: AbortSignal) => request<LiveQuoteStatus[]>("/api/v1/quotes/live/status/all", { signal }),
+  getKLines: (productCode: string, interval: KLineInterval, signal: AbortSignal, limit = 240) => {
+    const query = new URLSearchParams({ product_code: productCode, interval, limit: String(limit) });
+    // 伦敦金的合并序列最高支持日线。
+    if (productCode !== "WG-XAUUSD" || ["week", "month", "year"].includes(interval)) {
+      query.set("source", "jd_public_kline");
+    }
+    return request<KLineBar[]>(`/api/v1/quotes/bars/kline?${query}`, { signal });
+  },
+  getQuoteHistory: (productCode: string, signal: AbortSignal) =>
+    request<[string, number][]>(`/api/v1/quotes/live/history?product_code=${encodeURIComponent(productCode)}`, { signal }),
 
   getModelStatus: (signal?: AbortSignal) => request<ModelStatusResponse>("/api/v1/models/status", { signal }),
   getNewsOverview: (limit = 50, signal?: AbortSignal) => request<NewsOverviewResponse>(`/api/v1/models/news/overview?limit=${limit}`, { signal }),
@@ -109,6 +144,18 @@ export const api = {
     request<ReconciliationReport[]>(`/api/v1/reconciliation/reports?limit=${limit}`, { signal }),
   listOrders: (signal?: AbortSignal, limit?: number) =>
     request<OrderEvent[]>(`/api/v1/ledger/orders${limit !== undefined ? `?limit=${limit}` : ""}`, { signal }),
+  getLedgerFifoSummary: (
+    params?: { only_open?: boolean; reference_price?: number; offset?: number; limit?: number },
+    signal?: AbortSignal
+  ) => {
+    const q = new URLSearchParams();
+    if (params?.only_open !== undefined) q.set("only_open", String(params.only_open));
+    if (params?.reference_price !== undefined) q.set("reference_price", String(params.reference_price));
+    if (params?.offset !== undefined) q.set("offset", String(params.offset));
+    if (params?.limit !== undefined) q.set("limit", String(params.limit));
+    const suffix = q.toString() ? `?${q.toString()}` : "";
+    return request<FifoSummaryResponse>(`/api/v1/ledger/fifo-summary${suffix}`, { signal });
+  },
   initLedgerFromJd: (initialCash?: number) =>
     request<AccountSnapshot>(
       initialCash !== undefined ? `/api/v1/ledger/init-from-jd?initial_cash=${initialCash}` : "/api/v1/ledger/init-from-jd",
@@ -151,4 +198,59 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+
+  // TimesFM 3.0 多因子训练工作流
+  getTimesfmStatus: (signal?: AbortSignal) => request<TimesFMStatusResponse>("/api/v1/timesfm/status", { signal }),
+  prepareTimesfm: (payload: TimesFMPrepareRequest) =>
+    request<TimesFMPrepareReport>("/api/v1/timesfm/prepare", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  trainTimesfm: (payload: TimesFMTrainRequest) =>
+    request<TimesFMTrainReport>("/api/v1/timesfm/train", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  backtestTimesfm: (payload: TimesFMBacktestRequest) =>
+    request<TimesFMBacktestReport>("/api/v1/timesfm/backtest", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  exportTimesfm: (payload: TimesFMExportRequest) =>
+    request<TimesFMExportReport>("/api/v1/timesfm/export", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  listTimesfmExperiments: (limit = 20, signal?: AbortSignal) =>
+    request<TimesFMExperimentListResponse>(`/api/v1/timesfm/experiments?limit=${limit}`, { signal }),
+
+  // Qlib 量化研究与训练工作流
+  getQlibStatus: (signal?: AbortSignal) => request<QlibStatusResponse>("/api/v1/qlib/status", { signal }),
+  exportQlib: (payload: QlibExportRequest) =>
+    request<QlibExportReport>("/api/v1/qlib/export", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  evaluateQlibFactors: (payload: QlibFactorEvaluateRequest) =>
+    request<QlibFactorEvaluateReport>("/api/v1/qlib/factors/evaluate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  trainQlib: (payload: QlibTrainRequest) =>
+    request<QlibTrainReport>("/api/v1/qlib/train", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  backtestQlib: (payload: QlibBacktestRequest) =>
+    request<QlibBacktestReport>("/api/v1/qlib/backtest", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  generateQlibSignal: (payload: QlibSignalRequest) =>
+    request<QlibSignalResponse>("/api/v1/qlib/signal", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  listQlibExperiments: (limit = 20, signal?: AbortSignal) =>
+    request<QlibExperimentListResponse>(`/api/v1/qlib/experiments?limit=${limit}`, { signal }),
 };

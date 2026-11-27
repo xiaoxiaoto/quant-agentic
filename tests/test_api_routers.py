@@ -88,6 +88,19 @@ def test_ledger_snapshot_and_orders_api() -> None:
     assert resp_orders.status_code == 200
     assert isinstance(resp_orders.json(), list)
 
+    resp_fifo = client.get("/api/v1/ledger/fifo-summary")
+    assert resp_fifo.status_code == 200
+    fifo_data = resp_fifo.json()
+    assert "open_position_cost" in fifo_data
+    assert "open_grams" in fifo_data
+    assert "open_lot_count" in fifo_data
+    assert "items" in fifo_data
+
+    # 非法 reference_price（非正数 / 非有限浮点）应返回 422
+    for bad_price in ("0", "-10", "nan", "inf"):
+        bad_resp = client.get(f"/api/v1/ledger/fifo-summary?reference_price={bad_price}")
+        assert bad_resp.status_code == 422
+
 
 def test_reconciliation_snapshot_api() -> None:
     payload = {
@@ -382,3 +395,140 @@ def test_concurrent_quote_recording_preserves_integrity() -> None:
     assert len(rows) == 12
     saved = [QuoteRaw.model_validate_json(row[0]) for row in rows]
     assert all(q.record_hash == runtime.quotes.compute_record_hash(q) for q in saved)
+
+
+def test_cross_site_write_protection() -> None:
+    now_str = datetime.now(UTC).isoformat()
+    payload = {
+        "quote_id": "csrf_test_01",
+        "source_id": "test_src",
+        "bid_price": 610.0,
+        "ask_price": 610.5,
+        "quote_at": now_str,
+        "is_tradable": True,
+        "product_code": "GOLD_ACCUMULATION",
+    }
+
+    # 1. 未授权外部 Origin 被拒绝
+    resp_untrusted = client.post("/api/v1/quotes", json=payload, headers={"Origin": "https://evil.com"})
+    assert resp_untrusted.status_code == 403
+    assert resp_untrusted.json()["detail"] == "拒绝跨站写入请求"
+
+    # 2. null Origin（如沙箱 iframe/本地文件）被拒绝
+    resp_null = client.post("/api/v1/quotes", json=payload, headers={"Origin": "null"})
+    assert resp_null.status_code == 403
+    assert resp_null.json()["detail"] == "拒绝跨站写入请求"
+
+    # 3. 浏览器显式声明 Sec-Fetch-Site: cross-site 且无白名单来源被拒绝
+    resp_cross_site = client.post("/api/v1/quotes", json=payload, headers={"Sec-Fetch-Site": "cross-site"})
+    assert resp_cross_site.status_code == 403
+    assert resp_cross_site.json()["detail"] == "拒绝跨站写入请求"
+
+    # 4. 未授权 Referer 跨站提交被拒绝
+    resp_referer = client.post(
+        "/api/v1/quotes", json=payload, headers={"Referer": "https://evil-phishing.org/index.html"}
+    )
+    assert resp_referer.status_code == 403
+    assert resp_referer.json()["detail"] == "拒绝跨站写入请求"
+
+    # 5. 协议不一致（https vs http 直连）被拒绝
+    resp_scheme_mismatch = client.post(
+        "/api/v1/quotes", json=payload, headers={"Host": "testserver", "Origin": "https://testserver"}
+    )
+    assert resp_scheme_mismatch.status_code == 403
+    assert resp_scheme_mismatch.json()["detail"] == "拒绝跨站写入请求"
+
+    # 6. 合法同源写入请求放行
+    resp_same_origin = client.post(
+        "/api/v1/quotes", json=payload, headers={"Host": "testserver", "Origin": "http://testserver"}
+    )
+    assert resp_same_origin.status_code == 200
+
+    # 6.5 多跳反向代理逗号分隔的 X-Forwarded-Proto / X-Forwarded-Host 合法同源写入放行
+    resp_multihop = client.post(
+        "/api/v1/quotes",
+        json=payload,
+        headers={
+            "Host": "internal:8000",
+            "X-Forwarded-Proto": "https, http",
+            "X-Forwarded-Host": "api.example.com, internal:8000",
+            "Origin": "https://api.example.com",
+        },
+    )
+    assert resp_multihop.status_code == 200
+
+    # 7. 安全读取请求（GET）不受跨站拦截约束
+    resp_get = client.get(
+        "/api/v1/quotes/latest",
+        headers={"Origin": "https://evil.com", "Sec-Fetch-Site": "cross-site"},
+    )
+    assert resp_get.status_code == 200
+
+
+def test_cross_site_write_allowed_origins_and_api_token(tmp_path: Path) -> None:
+    from pydantic import SecretStr
+
+    custom_runtime = RuntimeDependencies(
+        Settings.model_construct(
+            data_dir=str(tmp_path),
+            timesfm_enabled=False,
+            news_enabled=False,
+            allowed_origins=("https://trusted.company.com", "http://localhost:5173"),
+            api_auth_token=SecretStr("super-secret-token"),
+        )
+    )
+    app.dependency_overrides[RuntimeDependencies.from_request] = lambda: custom_runtime
+
+    now_str = datetime.now(UTC).isoformat()
+    payload = {
+        "quote_id": "trusted_origin_q",
+        "source_id": "test_src",
+        "bid_price": 612.0,
+        "ask_price": 612.5,
+        "quote_at": now_str,
+        "is_tradable": True,
+        "product_code": "GOLD_ACCUMULATION",
+    }
+
+    # 1. 跨站且非白名单：即使携带合法 token 亦坚决拒绝
+    resp_blocked = client.post(
+        "/api/v1/quotes",
+        json=payload,
+        headers={"Origin": "https://evil.com", "Authorization": "Bearer super-secret-token"},
+    )
+    assert resp_blocked.status_code == 403
+    assert resp_blocked.json()["detail"] == "拒绝跨站写入请求"
+
+    # 2. 白名单 Origin 但缺失 Token：报 401
+    resp_no_token = client.post(
+        "/api/v1/quotes",
+        json=payload,
+        headers={"Origin": "https://trusted.company.com"},
+    )
+    assert resp_no_token.status_code == 401
+    assert resp_no_token.json()["detail"] == "缺少或无效的 API 访问令牌"
+
+    # 3. 白名单 Origin + Bearer Token：成功放行
+    resp_valid_bearer = client.post(
+        "/api/v1/quotes",
+        json=payload,
+        headers={
+            "Origin": "https://trusted.company.com",
+            "Authorization": "Bearer super-secret-token",
+        },
+    )
+    assert resp_valid_bearer.status_code == 200
+    assert resp_valid_bearer.json()["quote_id"] == "trusted_origin_q"
+
+    # 4. 白名单 Referer + X-API-Key Token：成功放行
+    payload["quote_id"] = "trusted_referer_q"
+    resp_valid_api_key = client.post(
+        "/api/v1/quotes",
+        json=payload,
+        headers={
+            "Referer": "http://localhost:5173/dashboard",
+            "X-API-Key": "super-secret-token",
+        },
+    )
+    assert resp_valid_api_key.status_code == 200
+    assert resp_valid_api_key.json()["quote_id"] == "trusted_referer_q"

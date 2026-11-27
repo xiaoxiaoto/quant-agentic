@@ -11,3 +11,11 @@ class QlibUnavailableError(RuntimeError):
 
 class QlibDatasetError(ValueError):
     """Qlib 数据集目录无效、样本不足或导出参数不合法时抛出的领域异常。"""
+
+
+class TimesFMDatasetError(ValueError):
+    """TimesFM 数据集无效、样本不足、回测窗口越界或导出参数不合法时抛出的领域异常。"""
+
+
+class TimesFMTrainingError(RuntimeError):
+    """TimesFM 推理特征提取、微调或融合头训练失败时抛出的领域异常。"""

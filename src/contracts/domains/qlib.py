@@ -5,7 +5,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from src.contracts.enums.trading import HoldingPeriod
+from src.contracts.enums.trading import DecisionAction, HoldingPeriod
+
+QlibFactorPreset = Literal["gold_core", "alpha158_lite", "au9999_timing", "custom"]
+QlibWindowMode = Literal["expanding", "rolling"]
+QlibLabelMode = Literal["net", "gross"]
 
 
 class QlibFactorSpec(BaseModel):
@@ -54,7 +58,7 @@ class QlibExperimentRecord(BaseModel):
     source_type: Literal["local_sqlite", "external_qlib"] = Field(description="训练数据源类型")
     provider_uri: str = Field(description="实际使用的 Qlib 数据目录")
     model_type: Literal["lgb", "linear"] = Field(description="训练模型类型")
-    factor_preset: Literal["gold_core", "alpha158_lite", "custom"] = Field(description="使用的因子预设")
+    factor_preset: QlibFactorPreset = Field(description="使用的因子预设")
     instruments: list[str] = Field(default_factory=list, description="参与训练的标的列表")
     freq: str = Field(description="数据频率")
     horizons: list[HoldingPeriod] = Field(default_factory=list, description="训练与评估的目标持有期列表")
@@ -63,3 +67,68 @@ class QlibExperimentRecord(BaseModel):
     model_output_dir: str | None = Field(default=None, description="导出的 QlibAgent 模型产物目录")
     qlib_recorder_id: str | None = Field(default=None, description="Qlib Recorder 运行 ID（若启用）")
     created_at: datetime = Field(description="实验记录创建时间")
+
+
+class QlibBacktestTrade(BaseModel):
+    """单标的 Qlib 阈值择时回测中的单笔成交记录。"""
+
+    timestamp: datetime = Field(description="成交时间戳")
+    action: Literal["BUY", "SELL"] = Field(description="交易方向")
+    price: float = Field(gt=0.0, description="成交单价")
+    grams: float = Field(gt=0.0, description="成交克重")
+    fee: float = Field(ge=0.0, description="本笔交易手续费")
+    score: float = Field(description="触发本笔交易的模型预测得分")
+    net_return_lcb: float | None = Field(default=None, description="预测净收益置信下界")
+    cash_after: float = Field(ge=0.0, description="成交后可用现金")
+    position_grams_after: float = Field(ge=0.0, description="成交后持仓克重")
+    equity_after: float = Field(ge=0.0, description="成交后账户总权益")
+
+
+class QlibBacktestEquityPoint(BaseModel):
+    """单标的择时回测净值轨迹节点。"""
+
+    timestamp: datetime = Field(description="观测时间戳")
+    close_price: float = Field(gt=0.0, description="标的收盘价")
+    score: float = Field(description="当日样本外预测得分")
+    position_grams: float = Field(ge=0.0, description="当日收盘持仓克重")
+    strategy_equity: float = Field(ge=0.0, description="策略账户权益")
+    benchmark_equity: float = Field(ge=0.0, description="买入持有基准权益")
+
+
+class QlibBacktestSummary(BaseModel):
+    """单标的 Qlib 阈值择时回测综合绩效指标。"""
+
+    initial_cash: float = Field(gt=0.0, description="初始资金")
+    final_equity: float = Field(ge=0.0, description="期末策略权益")
+    total_return: float = Field(description="策略累计收益率")
+    annual_return: float = Field(description="策略年化收益率")
+    sharpe_ratio: float = Field(description="年化夏普比率")
+    max_drawdown: float = Field(ge=0.0, description="最大回撤比例")
+    calmar_ratio: float = Field(description="卡玛比率")
+    benchmark_return: float = Field(description="同期买入持有收益率")
+    excess_return: float = Field(description="相对买入持有的超额收益率")
+    trade_count: int = Field(ge=0, description="成交总笔数")
+    round_trip_count: int = Field(ge=0, description="完整开平仓回合数")
+    win_rate: float = Field(ge=0.0, le=1.0, description="完整回合胜率")
+    total_fees: float = Field(ge=0.0, description="累计手续费支出")
+    bars_evaluated: int = Field(ge=0, description="参与回测的有效样本根数")
+
+
+class QlibSignalRecord(BaseModel):
+    """Qlib 单标的盘前择时信号与特征快照。"""
+
+    signal_id: str = Field(description="信号唯一标识")
+    instrument: str = Field(description="目标品种代码")
+    as_of: datetime = Field(description="信号计算所依据的最新数据时间戳")
+    horizon: HoldingPeriod = Field(description="预测持有期")
+    predicted_return: float = Field(description="预测预期收益率（score）")
+    net_return_lcb: float = Field(description="预测净收益置信下界")
+    win_probability: float = Field(ge=0.0, le=1.0, description="校准后盈利概率")
+    action: DecisionAction = Field(description="按阈值规则生成的择时动作建议")
+    buy_thresh: float = Field(description="买入阈值")
+    sell_thresh: float = Field(description="卖出阈值")
+    latest_close: float = Field(gt=0.0, description="最新收盘价")
+    model_dir: str = Field(description="使用的 QlibAgent 模型目录")
+    alert_id: str | None = Field(default=None, description="若推送至人工复核队列则返回提醒 ID")
+    feature_snapshot: dict[str, float | None] = Field(default_factory=dict, description="本次推理使用的特征快照")
+    created_at: datetime = Field(description="信号生成时间")

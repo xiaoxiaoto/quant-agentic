@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from main import app
 from src.clients.jd_gold import JDGoldClient, JDGoldError
 from src.configs.settings import Settings
+from src.contracts.domains.reference_quote import ReferenceQuote
 from src.contracts.enums.trading import DataQualityState
 from src.runtime.dependencies import RuntimeDependencies
 
@@ -160,6 +161,31 @@ def test_live_routes_and_disabled_mode(tmp_path: Path) -> None:
             assert client.post("/api/v1/quotes/live/collect").status_code == 503
     finally:
         app.dependency_overrides.clear()
+
+
+def test_live_history_only_returns_valid_source_points(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = runtime_for(tmp_path, enabled=False)
+    stamp = datetime(2026, 11, 26, 1, tzinfo=UTC)
+    normal = ReferenceQuote(
+        quote_id="sample", price=812.16, quote_at=stamp, received_at=stamp + timedelta(seconds=2), payload_hash="sample"
+    )
+    monkeypatch.setattr(
+        runtime.live_quotes,
+        "query_series",
+        lambda *args, **kwargs: [
+            normal.model_copy(update={"quote_at": None, "quality_state": DataQualityState.GAP}),
+            normal.model_copy(update={"quality_state": DataQualityState.ANOMALY}),
+            normal,
+        ],
+    )
+    monkeypatch.setitem(app.dependency_overrides, RuntimeDependencies.from_request, lambda: runtime)
+    client = TestClient(app)
+    path = "/api/v1/quotes/live/history"
+    response = client.get(path, params={"product_code": "CMBC-JCJ", "limit": 3})
+    assert response.status_code == 200
+    assert response.json() == [["2026-11-26T01:00:00Z", 812.16]]
+    assert client.get(path, params={"limit": 5001}).status_code == 422
+    assert client.get(path, params={"product_code": "unknown"}).status_code == 422
 
 
 def test_lifespan_runs_collection_and_closes_connections(tmp_path: Path) -> None:

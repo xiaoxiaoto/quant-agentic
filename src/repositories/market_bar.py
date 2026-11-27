@@ -27,10 +27,12 @@ class MarketBarRepository:
         utc_dt = dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
         return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
-    def save_klines(self, bars: list[KLineBar]) -> int:
-        """批量按 (品种, 周期, 来源, K 线时间) 增量写入：仅插入新柱或更新 OHLCV 发生变化的柱。"""
+    def save_klines_with_counts(self, series: dict[str, list[KLineBar]]) -> dict[str, int]:
+        """在同一事务批量增量写入，返回各周期更新条数。"""
+        counts = dict.fromkeys(series, 0)
+        bars = [bar for group in series.values() for bar in group]
         if not bars:
-            return 0
+            return counts
         deduped: dict[tuple[str, str, str, str], dict[str, object]] = {}
         for bar in bars:
             bar_time_utc = self._format_utc(bar.bar_time)
@@ -49,10 +51,13 @@ class MarketBarRepository:
                 "volume": bar.volume,
                 "turnover": bar.turnover,
                 "collected_at_utc": self._format_utc(bar.collected_at),
+                "available_at_utc": self._format_utc(bar.available_at) if bar.available_at is not None else None,
+                "origin_source": bar.origin_source,
                 "raw_json": bar.model_dump_json(),
             }
         groups: dict[tuple[str, str, str], list[dict[str, object]]] = {}
-        for (product_code, interval, source, _bar_time), row in deduped.items():
+        for key, row in deduped.items():
+            product_code, interval, source, _bar_time = key
             groups.setdefault((product_code, interval, source), []).append(row)
 
         to_write: list[dict[str, object]] = []
@@ -60,31 +65,40 @@ class MarketBarRepository:
             with Session(self._engine) as read_session:
                 for (product_code, interval, source), group_rows in groups.items():
                     times = [str(r["bar_time_utc"]) for r in group_rows]
-                    existing_rows = read_session.execute(
-                        select(
-                            KLineBarRecord.bar_time_utc,
-                            KLineBarRecord.trade_date,
-                            KLineBarRecord.open_price,
-                            KLineBarRecord.high_price,
-                            KLineBarRecord.low_price,
-                            KLineBarRecord.close_price,
-                            KLineBarRecord.pre_close,
-                            KLineBarRecord.volume,
-                            KLineBarRecord.turnover,
-                        ).where(
-                            KLineBarRecord.product_code == product_code,
-                            KLineBarRecord.interval == interval,
-                            KLineBarRecord.source == source,
-                            KLineBarRecord.bar_time_utc >= min(times),
-                            KLineBarRecord.bar_time_utc <= max(times),
-                        )
-                    ).all()
+                    base_stmt = select(
+                        KLineBarRecord.bar_time_utc,
+                        KLineBarRecord.trade_date,
+                        KLineBarRecord.open_price,
+                        KLineBarRecord.high_price,
+                        KLineBarRecord.low_price,
+                        KLineBarRecord.close_price,
+                        KLineBarRecord.pre_close,
+                        KLineBarRecord.volume,
+                        KLineBarRecord.turnover,
+                        KLineBarRecord.available_at_utc,
+                        KLineBarRecord.origin_source,
+                    ).where(
+                        KLineBarRecord.product_code == product_code,
+                        KLineBarRecord.interval == interval,
+                        KLineBarRecord.source == source,
+                    )
+                    if len(times) <= 500:
+                        existing_rows = read_session.execute(
+                            base_stmt.where(KLineBarRecord.bar_time_utc.in_(times))
+                        ).all()
+                    else:
+                        existing_rows = read_session.execute(
+                            base_stmt.where(
+                                KLineBarRecord.bar_time_utc >= min(times),
+                                KLineBarRecord.bar_time_utc <= max(times),
+                            )
+                        ).all()
                     existing = {
-                        row[0]: (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8])
+                        row[0]: (row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10])
                         for row in existing_rows
                     }
                     for row in group_rows:
-                        fp = (
+                        fingerprint = (
                             row["trade_date"],
                             row["open_price"],
                             row["high_price"],
@@ -93,12 +107,14 @@ class MarketBarRepository:
                             row["pre_close"],
                             row["volume"],
                             row["turnover"],
+                            row["available_at_utc"],
+                            row["origin_source"],
                         )
-                        if existing.get(str(row["bar_time_utc"])) != fp:
+                        if existing.get(str(row["bar_time_utc"])) != fingerprint:
                             to_write.append(row)
 
             if not to_write:
-                return 0
+                return counts
 
             with SQLiteDatabase.write_session(self._engine) as session:
                 for idx in range(0, len(to_write), self._BATCH_SIZE):
@@ -116,11 +132,22 @@ class MarketBarRepository:
                             "volume": stmt.excluded.volume,
                             "turnover": stmt.excluded.turnover,
                             "collected_at_utc": stmt.excluded.collected_at_utc,
+                            "available_at_utc": stmt.excluded.available_at_utc,
+                            "origin_source": stmt.excluded.origin_source,
                             "raw_json": stmt.excluded.raw_json,
                         },
                     )
                     session.execute(stmt)
-        return len(to_write)
+        for row in to_write:
+            counts[str(row["interval"])] = counts.get(str(row["interval"]), 0) + 1
+        return counts
+
+    def save_klines(self, bars: list[KLineBar]) -> int:
+        """批量按品种、周期、来源及时间增量写入。"""
+        series: dict[str, list[KLineBar]] = {}
+        for bar in bars:
+            series.setdefault(bar.interval, []).append(bar)
+        return sum(self.save_klines_with_counts(series).values())
 
     def save_time_sharing(self, points: list[TimeSharingPoint]) -> int:
         """批量按 (品种, 分时颗粒度, 来源, 交易时间) 增量写入：仅插入新点或更新价格/量额变化的点。"""
@@ -217,17 +244,23 @@ class MarketBarRepository:
         product_code: str,
         interval: str,
         *,
-        source: str | None = None,
+        source: str | tuple[str, ...] | None = None,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
-        limit: int = 500,
+        limit: int | None = 500,
     ) -> list[KLineBar]:
         """按品种与周期查询已持久化的 K 线序列（按时间升序返回）。"""
+        if limit is not None and limit < 0:
+            raise ValueError("limit 不能为负数")
+        if limit == 0:
+            return []
         stmt = select(KLineBarRecord.raw_json).where(
             KLineBarRecord.product_code == product_code,
             KLineBarRecord.interval == interval,
         )
-        if source is not None:
+        if isinstance(source, tuple):
+            stmt = stmt.where(KLineBarRecord.source.in_(source))
+        elif source is not None:
             stmt = stmt.where(KLineBarRecord.source == source)
         if start_time is not None:
             stmt = stmt.where(KLineBarRecord.bar_time_utc >= self._format_utc(start_time))

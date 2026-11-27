@@ -24,7 +24,7 @@ from pathlib import Path
 from threading import Lock
 from typing import ClassVar
 
-from sqlalchemy import URL, Boolean, Engine, Float, Index, Integer, Text, UniqueConstraint, create_engine, event
+from sqlalchemy import URL, Boolean, Engine, Float, Index, Integer, Text, UniqueConstraint, create_engine, event, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from sqlalchemy.pool import NullPool
@@ -79,6 +79,13 @@ class ReferenceQuoteRecord(QuantBase):
     __table_args__ = (
         Index("ix_ref_quotes_product_id", "product_code", "id"),
         Index("ix_ref_quotes_product_received_id", "product_code", "received_at_utc", "id"),
+        Index(
+            "ix_ref_quotes_product_valid_received_id",
+            "product_code",
+            "received_at_utc",
+            "id",
+            sqlite_where=text("quote_at_utc IS NOT NULL AND quality_state = 'NORMAL'"),
+        ),
         Index("ix_ref_quotes_product_hash", "product_code", "record_hash"),
     )
 
@@ -131,6 +138,8 @@ class KLineBarRecord(QuantBase):
     volume: Mapped[float | None] = mapped_column(Float, nullable=True)
     turnover: Mapped[float | None] = mapped_column(Float, nullable=True)
     collected_at_utc: Mapped[str] = mapped_column(Text, nullable=False)
+    available_at_utc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    origin_source: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
@@ -330,6 +339,39 @@ class SQLiteDatabase:
         connection.execute("PRAGMA foreign_keys = ON").close()
         connection.execute("PRAGMA secure_delete = ON").close()
 
+    @staticmethod
+    def _migrate_schema(engine: Engine) -> None:
+        """为已有 SQLite 库幂等补齐新增标量列与部分索引。"""
+        with engine.connect() as conn:
+            cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(market_kline_bars)").fetchall()}
+            idx_exists = (
+                conn.exec_driver_sql(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'index' AND name = 'ix_ref_quotes_product_valid_received_id'"
+                ).fetchone()
+                is not None
+            )
+        if {"available_at_utc", "origin_source"}.issubset(cols) and idx_exists:
+            return
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(market_kline_bars)").fetchall()}
+                if "available_at_utc" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE market_kline_bars ADD COLUMN available_at_utc TEXT")
+                if "origin_source" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE market_kline_bars ADD COLUMN origin_source TEXT")
+                conn.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_ref_quotes_product_valid_received_id "
+                    "ON reference_quotes (product_code, received_at_utc, id) "
+                    "WHERE quote_at_utc IS NOT NULL AND quality_state = 'NORMAL'"
+                )
+                conn.exec_driver_sql("COMMIT")
+            except BaseException:
+                with suppress(Exception):
+                    conn.exec_driver_sql("ROLLBACK")
+                raise
+
     @classmethod
     def prepare_sqlite_file(cls, path: str | Path) -> Path:
         """创建受限权限（0o700 目录 / 0o600 文件）的 SQLite 数据库文件及 WAL 侧文件。"""
@@ -411,8 +453,9 @@ class SQLiteDatabase:
 
     @classmethod
     def create_engine_for_path(cls, path: str | Path, *, hide_parameters: bool = False) -> Engine:
-        """创建受限权限的 SQLite 引擎并确保全部规范表已初始化。"""
+        """创建受限权限的 SQLite 引擎并确保全部规范表及增量结构已初始化。"""
         with cls._INIT_LOCK:
             engine = cls.create_wal_engine(path, hide_parameters=hide_parameters)
             QuantBase.metadata.create_all(engine)
+            cls._migrate_schema(engine)
             return engine

@@ -6,20 +6,29 @@ import bisect
 import json
 import math
 import operator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import ClassVar, Literal
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from src.contracts.domains.market_bar import KLineBar
+from src.contracts.domains.market_bar import (
+    MACRO_DXY_PRODUCT,
+    MACRO_US10Y_PRODUCT,
+    MACRO_USDCNY_PRODUCT,
+    XAUUSD_MERGED_SOURCE,
+    XAUUSD_ORIGIN_CODES,
+    XAUUSD_PRODUCT,
+    KLineBar,
+)
 from src.contracts.domains.product import FeeRule
 from src.contracts.domains.qlib import QlibDatasetManifest
 from src.contracts.domains.quote import QuoteRaw
 from src.contracts.domains.reference_quote import ReferenceProductCatalog
 from src.contracts.enums.trading import DataQualityState
 from src.contracts.exceptions import QlibDatasetError
-from src.contracts.schemas.qlib import QlibExportReport, QlibExportRequest
+from src.contracts.schemas.qlib import QlibExportFrequency, QlibExportReport, QlibExportRequest
 from src.repositories.quote import QuoteRepository
 from src.services.market.bar_collector import MarketBarCollector
 from src.services.market.live_quotes import LiveQuoteCollector
@@ -29,6 +38,11 @@ from src.services.market.session_calendar import SessionCalendar
 class QlibDataExporter:
     """将本地 SQLite 双边报价/参考行情/K 线按 PIT 导出为标准 Qlib 二进制目录，并支持外部目录校验。"""
 
+    _SHANGHAI: ClassVar[ZoneInfo] = ZoneInfo("Asia/Shanghai")
+    _KLINE_SOURCE_PRIORITY: ClassVar[dict[str, int]] = {
+        "jd_public_kline": 2,
+        "jd_sim_kline": 1,
+    }
     _KLINE_INTERVAL_DELTAS: ClassVar[dict[str, timedelta]] = {
         "m1": timedelta(minutes=1),
         "m5": timedelta(minutes=5),
@@ -51,7 +65,7 @@ class QlibDataExporter:
         fee_rule: FeeRule | None = None,
         basis_reference_product: str = "SGE-Au99.99",
         default_product_code: str = "GOLD_ACCUMULATION",
-        default_kline_products: tuple[str, ...] = ("CMBC-JCJ", "SGE-Au99.99", "WG-JDAU"),
+        default_kline_products: tuple[str, ...] = ("CMBC-JCJ", "SGE-Au99.99", "WG-JDAU", "WG-XAUUSD"),
     ) -> None:
         self._quotes = quotes
         self._calendar = calendar
@@ -67,15 +81,27 @@ class QlibDataExporter:
         return dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
     @staticmethod
-    def _bucket_key(dt: datetime, freq: Literal["1h", "day"]) -> str:
+    def _is_iso_date(value: str) -> bool:
+        if len(value) != 10:
+            return False
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    def _bucket_key(dt: datetime, freq: QlibExportFrequency) -> str:
         utc_dt = dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
         if freq == "day":
             return utc_dt.strftime("%Y-%m-%d")
-        return utc_dt.strftime("%Y-%m-%d %H:00:00")
+        if freq == "1h":
+            return utc_dt.strftime("%Y-%m-%d %H:00:00")
+        return utc_dt.strftime("%Y-%m-%d %H:%M:00")
 
     @staticmethod
-    def _qlib_freq_name(freq: Literal["1h", "day"]) -> str:
-        return "60min" if freq == "1h" else "day"
+    def _qlib_freq_name(freq: QlibExportFrequency) -> str:
+        return "60min" if freq == "1h" else freq
 
     @staticmethod
     def _write_qlib_bin(path: Path, start_index: int, values: list[float]) -> None:
@@ -88,7 +114,7 @@ class QlibDataExporter:
         if self._live_quotes is None:
             return [], []
         try:
-            refs = self._live_quotes.query_series(self._basis_reference_product, limit=None)
+            refs = self._live_quotes.query_series(self._basis_reference_product, limit=None, valid_only=True)
         except ValueError:
             return [], []
         pairs: list[tuple[datetime, float]] = []
@@ -107,6 +133,99 @@ class QlibDataExporter:
         idx = bisect.bisect_right(times, as_of) - 1
         return prices[idx] if idx >= 0 else float("nan")
 
+    @staticmethod
+    def _lookup_pit_change(
+        times: list[datetime],
+        values: list[float],
+        as_of: datetime,
+        *,
+        mode: Literal["return", "diff"],
+    ) -> float:
+        """按严格 PIT 截止时间查找最近两条已知观测并计算日收益率或日变动。"""
+        if len(times) < 2:
+            return float("nan")
+        idx = bisect.bisect_right(times, as_of) - 1
+        if idx < 1:
+            return float("nan")
+        curr = values[idx]
+        prev = values[idx - 1]
+        if not (math.isfinite(curr) and math.isfinite(prev)):
+            return float("nan")
+        if mode == "diff":
+            return curr - prev
+        if prev <= 0.0:
+            return float("nan")
+        return curr / prev - 1.0
+
+    def _load_daily_close_series(
+        self,
+        product_code: str,
+        *,
+        sources: tuple[str, ...],
+        bar_cache: dict[tuple[str, str, str], list[KLineBar]] | None = None,
+    ) -> tuple[list[datetime], list[float]]:
+        if self._market_bars is None:
+            return [], []
+        bars: list[KLineBar] = []
+        for src in sources:
+            cache_key = (product_code, "day", src)
+            if bar_cache is not None and cache_key in bar_cache:
+                fetched = bar_cache[cache_key]
+            else:
+                try:
+                    fetched = self._market_bars.query_klines(product_code, "day", source=src, limit=None)
+                except ValueError:
+                    continue
+                if bar_cache is not None and fetched:
+                    bar_cache[cache_key] = fetched
+            if fetched:
+                bars = fetched
+                break
+        if not bars:
+            return [], []
+        by_ts: dict[datetime, float] = {}
+        for bar in bars:
+            if not math.isfinite(bar.close_price) or bar.close_price <= 0:
+                continue
+            ts = self._to_utc(bar.available_at) if bar.available_at else self._to_utc(bar.bar_time) + timedelta(days=1)
+            by_ts[ts] = bar.close_price
+        pairs = sorted(by_ts.items(), key=operator.itemgetter(0))
+        return [p[0] for p in pairs], [p[1] for p in pairs]
+
+    def _load_macro_series(
+        self,
+        bar_cache: dict[tuple[str, str, str], list[KLineBar]] | None = None,
+    ) -> dict[str, tuple[list[datetime], list[float]]]:
+        return {
+            "xau": self._load_daily_close_series(
+                XAUUSD_PRODUCT,
+                sources=(XAUUSD_MERGED_SOURCE, "jd_public_kline", "jd_sim_kline"),
+                bar_cache=bar_cache,
+            ),
+            "usdcny": self._load_daily_close_series(
+                MACRO_USDCNY_PRODUCT,
+                sources=("macro_daily",),
+                bar_cache=bar_cache,
+            ),
+            "dxy": self._load_daily_close_series(
+                MACRO_DXY_PRODUCT,
+                sources=("macro_daily",),
+                bar_cache=bar_cache,
+            ),
+            "us10y": self._load_daily_close_series(
+                MACRO_US10Y_PRODUCT,
+                sources=("macro_daily",),
+                bar_cache=bar_cache,
+            ),
+        }
+
+    def _premarket_cutoff_utc(self, bar: KLineBar, fallback: datetime) -> datetime:
+        """返回北京时间交易日盘前 08:30 对应的 UTC 截止时刻，杜绝外盘/宏观前视偏差。"""
+        if self._is_iso_date(bar.trade_date):
+            day = date.fromisoformat(bar.trade_date)
+            return datetime.combine(day, time(8, 30), self._SHANGHAI).astimezone(UTC)
+        return fallback
+
     def _calendar_features(self, dt: datetime) -> tuple[float, float, float]:
         hours_to_close = self._calendar.get_hours_until_weekend_close(dt)
         is_risk = 1.0 if self._calendar.is_in_weekend_risk_window(dt) else 0.0
@@ -121,7 +240,7 @@ class QlibDataExporter:
         self,
         quotes: list[QuoteRaw],
         *,
-        freq: Literal["1h", "day"],
+        freq: QlibExportFrequency,
         basis_times: list[datetime],
         basis_prices: list[float],
     ) -> dict[str, dict[str, float]]:
@@ -180,36 +299,56 @@ class QlibDataExporter:
         self,
         bars: list[KLineBar],
         *,
-        freq: Literal["1h", "day"],
+        freq: QlibExportFrequency,
         spread_pct: float,
         basis_times: list[datetime],
         basis_prices: list[float],
+        macro_series: dict[str, tuple[list[datetime], list[float]]] | None = None,
     ) -> dict[str, dict[str, float]]:
         half = spread_pct / 2.0
         now_utc = datetime.now(UTC)
         rows: dict[str, dict[str, float]] = {}
+        best_ranks: dict[str, tuple[int, datetime, datetime]] = {}
         for bar in sorted(bars, key=lambda b: self._to_utc(b.bar_time)):
             bar_dt = self._to_utc(bar.bar_time)
             bar_span = self._KLINE_INTERVAL_DELTAS.get(bar.interval, timedelta(hours=1 if freq == "1h" else 24))
-            bar_end_dt = bar_dt + bar_span
+            bar_end_dt = self._to_utc(bar.available_at) if bar.available_at else bar_dt + bar_span
             # 排除尚未收盘的当期不完整 K 线，并按柱结束时刻查询收盘基差参考价
             if bar_end_dt > now_utc:
                 continue
-            key = self._bucket_key(bar_dt, freq)
+            key = (
+                bar.trade_date
+                if freq == "day" and bar.interval == "day" and self._is_iso_date(bar.trade_date)
+                else self._bucket_key(bar_dt, freq)
+            )
+            rank = (
+                self._KLINE_SOURCE_PRIORITY.get(bar.source, 0),
+                self._to_utc(bar.collected_at),
+                bar_dt,
+            )
+            prev_rank = best_ranks.get(key)
+            if prev_rank is not None and rank < prev_rank:
+                continue
+            best_ranks[key] = rank
             bid = bar.close_price * (1.0 - half)
             ask = bar.close_price * (1.0 + half)
-            basis_ref = self._lookup_basis(basis_times, basis_prices, bar_end_dt)
+            basis_ref = (
+                float("nan")
+                if bar.product_code == XAUUSD_PRODUCT
+                else self._lookup_basis(basis_times, basis_prices, bar_end_dt)
+            )
             bank_basis = (
                 (bar.close_price / basis_ref) - 1.0 if math.isfinite(basis_ref) and basis_ref > 0 else float("nan")
             )
             h_close, h_open, risk_win = self._calendar_features(bar_end_dt)
-            rows[key] = {
+            row: dict[str, float] = {
                 "open": bar.open_price,
                 "high": bar.high_price,
                 "low": bar.low_price,
                 "close": bar.close_price,
                 "volume": bar.volume if bar.volume is not None else 0.0,
                 "turnover": bar.turnover if bar.turnover is not None else 0.0,
+                "factor": 1.0,
                 "bid": bid,
                 "ask": ask,
                 "spread": ask - bid,
@@ -219,6 +358,17 @@ class QlibDataExporter:
                 "hours_since_open": h_open,
                 "is_weekend_risk_window": risk_win,
             }
+            if macro_series is not None and freq == "day":
+                cutoff_utc = self._premarket_cutoff_utc(bar, bar_dt)
+                row["xau_ret"] = self._lookup_pit_change(*macro_series["xau"], cutoff_utc, mode="return")
+                row["usdcny_ret"] = self._lookup_pit_change(*macro_series["usdcny"], cutoff_utc, mode="return")
+                row["dxy_ret"] = self._lookup_pit_change(*macro_series["dxy"], cutoff_utc, mode="return")
+                row["us10y_diff"] = self._lookup_pit_change(*macro_series["us10y"], cutoff_utc, mode="diff")
+            if bar.origin_source:
+                origin_code = XAUUSD_ORIGIN_CODES.get(bar.origin_source)
+                if origin_code is not None:
+                    row["origin_source"] = origin_code
+            rows[key] = row
         return rows
 
     def _resolve_instruments(self, request: QlibExportRequest) -> list[str]:
@@ -228,6 +378,8 @@ class QlibDataExporter:
             return [self._default_product_code]
         if request.source_mode == "reference":
             return [item.code for item in ReferenceProductCatalog.all() if item.unit == "CNY/g"]
+        if request.kline_source == XAUUSD_MERGED_SOURCE or request.freq.endswith("min"):
+            return [XAUUSD_PRODUCT]
         return list(self._default_kline_products)
 
     def _load_instrument_rows(
@@ -236,6 +388,8 @@ class QlibDataExporter:
         request: QlibExportRequest,
         basis_times: list[datetime],
         basis_prices: list[float],
+        macro_series: dict[str, tuple[list[datetime], list[float]]] | None = None,
+        bar_cache: dict[tuple[str, str, str], list[KLineBar]] | None = None,
     ) -> dict[str, dict[str, float]]:
         now_utc = datetime.now(UTC)
         if request.source_mode == "quotes":
@@ -251,7 +405,7 @@ class QlibDataExporter:
             if self._live_quotes is None:
                 raise QlibDatasetError("未配置参考行情采集器，无法从参考行情库导出 Qlib 数据集")
             try:
-                refs = self._live_quotes.query_series(instrument, limit=None)
+                refs = self._live_quotes.query_series(instrument, limit=None, valid_only=True)
             except ValueError:
                 return {}
             half = request.spread_pct / 2.0
@@ -283,29 +437,62 @@ class QlibDataExporter:
             )
         if self._market_bars is None:
             raise QlibDatasetError("未配置多周期 K 线采集器，无法从 K 线库导出 Qlib 数据集")
-        try:
-            bars = self._market_bars.query_klines(instrument, request.kline_interval, limit=100000)
-        except ValueError:
-            return {}
+        interval = request.kline_interval
+        merged = instrument == XAUUSD_PRODUCT and request.kline_source in (None, XAUUSD_MERGED_SOURCE)
+        if merged:
+            if request.freq == "day":
+                interval = "day"
+            else:
+                interval = f"m{self._qlib_freq_name(request.freq).removesuffix('min')}"
+        source = request.kline_source
+        cache_key = (instrument, interval, XAUUSD_MERGED_SOURCE) if merged else None
+        if cache_key is not None and bar_cache is not None and cache_key in bar_cache:
+            bars = bar_cache[cache_key]
+        else:
+            try:
+                bars = self._market_bars.query_klines(
+                    instrument,
+                    interval,
+                    source=source if merged or source else ("jd_public_kline", "jd_sim_kline"),
+                    limit=None if merged else 100000,
+                )
+            except ValueError:
+                return {}
+            if cache_key is not None and bar_cache is not None and bars:
+                bar_cache[cache_key] = bars
         return self._aggregate_klines(
             bars,
             freq=request.freq,
             spread_pct=request.spread_pct,
             basis_times=basis_times,
             basis_prices=basis_prices,
+            macro_series=macro_series,
         )
 
     def export_local_dataset(self, request: QlibExportRequest, *, target_dir: Path) -> QlibExportReport:
         """将本地 SQLite 行情导出为标准 Qlib 二进制目录并生成清单文件。"""
         candidates = self._resolve_instruments(request)
+        if request.freq.endswith("min") and (
+            request.source_mode != "kline"
+            or request.kline_source not in (None, XAUUSD_MERGED_SOURCE)
+            or any(code != XAUUSD_PRODUCT for code in candidates)
+        ):
+            raise QlibDatasetError("分钟频须使用 XAUUSD 合并 K 线")
         if not candidates:
             raise QlibDatasetError("未指定可导出的品种列表")
 
-        basis_times, basis_prices = self._load_basis_series()
+        need_basis = request.source_mode != "kline" or any(code != XAUUSD_PRODUCT for code in candidates)
+        basis_times, basis_prices = self._load_basis_series() if need_basis else ([], [])
+        bar_cache: dict[tuple[str, str, str], list[KLineBar]] = {}
+        macro_series = (
+            self._load_macro_series(bar_cache=bar_cache)
+            if request.include_macro_features and request.source_mode == "kline" and request.freq == "day"
+            else None
+        )
         rows_by_instrument: dict[str, dict[str, dict[str, float]]] = {}
         skipped: list[str] = []
         for code in candidates:
-            rows = self._load_instrument_rows(code, request, basis_times, basis_prices)
+            rows = self._load_instrument_rows(code, request, basis_times, basis_prices, macro_series, bar_cache)
             if rows:
                 rows_by_instrument[code] = rows
             else:

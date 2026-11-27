@@ -17,7 +17,14 @@ from scipy.stats import spearmanr
 
 from src.agents.qlib import QlibAgent
 from src.contracts.domains.product import FeeRule
-from src.contracts.domains.qlib import QlibExperimentRecord, QlibFactorMetric
+from src.contracts.domains.qlib import (
+    QlibExperimentRecord,
+    QlibFactorMetric,
+    QlibFactorPreset,
+    QlibLabelMode,
+    QlibWindowMode,
+)
+from src.contracts.enums.trading import HoldingPeriod
 from src.contracts.exceptions import QlibDatasetError
 from src.contracts.schemas.model import WalkForwardFoldReport
 from src.contracts.schemas.qlib import (
@@ -151,11 +158,39 @@ class QlibResearchService:
         return rows
 
     @staticmethod
+    def _fit_robust_zscore(train_x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """仅在训练折内拟合中位数与 MAD 尺度（1.4826 * MAD），杜绝跨折信息泄漏。"""
+        medians = np.nanmedian(train_x, axis=0)
+        medians = np.where(np.isfinite(medians), medians, 0.0)
+        filled = np.where(np.isfinite(train_x), train_x, medians)
+        mad = np.median(np.abs(filled - medians), axis=0) * 1.4826
+        stds = np.std(filled, axis=0)
+        scales = np.where(mad > 1e-12, mad, np.where(stds > 1e-12, stds, 1.0))
+        return medians, scales
+
+    @staticmethod
+    def _transform_robust_zscore(
+        x: np.ndarray,
+        medians: np.ndarray,
+        scales: np.ndarray,
+        *,
+        clip: float = 3.0,
+    ) -> np.ndarray:
+        filled = np.where(np.isfinite(x), x, medians)
+        normed = (filled - medians) / np.where(scales > 1e-12, scales, 1.0)
+        return np.clip(normed, -clip, clip)
+
+    @staticmethod
     def _train_lgb_pair(
         train_x: np.ndarray,
         train_y: np.ndarray,
         feature_names: list[str],
         num_boost_round: int,
+        *,
+        max_depth: int = 4,
+        num_leaves: int = 12,
+        reg_alpha: float = 1.0,
+        reg_lambda: float = 5.0,
     ) -> tuple[lgb.Booster, lgb.Booster]:
         params = {
             "verbosity": -1,
@@ -163,9 +198,15 @@ class QlibResearchService:
             "seed": 42,
             "deterministic": True,
             "force_col_wise": True,
-            "num_leaves": 7,
+            "max_depth": max_depth,
+            "num_leaves": num_leaves,
             "min_data_in_leaf": 5,
             "learning_rate": 0.05,
+            "lambda_l1": reg_alpha,
+            "lambda_l2": reg_lambda,
+            "feature_fraction": 0.8,
+            "bagging_fraction": 0.8,
+            "bagging_freq": 1,
         }
         regressor = lgb.train(
             {**params, "objective": "regression"},
@@ -210,7 +251,7 @@ class QlibResearchService:
         norm_x = (filled - means) / stds
         return norm_x @ weights + intercept
 
-    def _fit_and_calibrate_window(
+    def _fit_and_calibrate_with_boosters(
         self,
         rows: list[tuple[datetime, datetime, np.ndarray, float]],
         *,
@@ -218,7 +259,12 @@ class QlibResearchService:
         model_type: Literal["lgb", "linear"],
         num_boost_round: int,
         confidence_level: float,
-    ) -> dict[str, Any]:
+        use_robust_zscore: bool = False,
+        lgb_max_depth: int = 4,
+        lgb_num_leaves: int = 12,
+        lgb_reg_alpha: float = 1.0,
+        lgb_reg_lambda: float = 5.0,
+    ) -> tuple[dict[str, Any], lgb.Booster | None, lgb.Booster | None]:
         split = int(len(rows) * 0.75)
         cal_rows = rows[split:]
         if len(cal_rows) < 20:
@@ -235,11 +281,34 @@ class QlibResearchService:
         if len(set((train_y > 0).tolist())) < 2 or len(set((cal_y > 0).tolist())) < 2:
             raise ValueError("训练集与校准集必须各自包含盈利与亏损样本")
 
+        robust_payload: dict[str, Any] = {}
+        if use_robust_zscore:
+            medians, scales = self._fit_robust_zscore(train_x)
+            train_x = self._transform_robust_zscore(train_x, medians, scales)
+            cal_x = self._transform_robust_zscore(cal_x, medians, scales)
+            robust_payload = {
+                "robust_medians": [float(v) for v in medians],
+                "robust_scales": [float(v) for v in scales],
+                "robust_clip": 3.0,
+            }
+
+        regressor: lgb.Booster | None = None
+        classifier: lgb.Booster | None = None
         if model_type == "lgb":
-            regressor, classifier = self._train_lgb_pair(train_x, train_y, feature_names, num_boost_round)
+            regressor, classifier = self._train_lgb_pair(
+                train_x,
+                train_y,
+                feature_names,
+                num_boost_round,
+                max_depth=lgb_max_depth,
+                num_leaves=lgb_num_leaves,
+                reg_alpha=lgb_reg_alpha,
+                reg_lambda=lgb_reg_lambda,
+            )
             cal_pred = np.asarray(regressor.predict(cal_x, num_threads=2), dtype=np.float64)
             cal_scores = np.asarray(classifier.predict(cal_x, raw_score=True, num_threads=2), dtype=np.float64)
             extra_payload: dict[str, Any] = {
+                **robust_payload,
                 "regressor": regressor.model_to_string(),
                 "classifier": classifier.model_to_string(),
             }
@@ -248,6 +317,7 @@ class QlibResearchService:
             cal_pred = self._predict_ridge(cal_x, weights, intercept, means, stds)
             cal_scores = cal_pred
             extra_payload = {
+                **robust_payload,
                 "weights": [float(v) for v in weights],
                 "intercept": intercept,
                 "feature_means": [float(v) for v in means],
@@ -256,7 +326,7 @@ class QlibResearchService:
 
         trained_until = max(row[1] for row in train_rows)
         calibrated_until = max(row[1] for row in cal_rows)
-        return QlibAgent.fit_calibration_entry(
+        entry = QlibAgent.fit_calibration_entry(
             cal_predicted=cal_pred,
             cal_raw_scores=cal_scores,
             cal_actual=cal_y,
@@ -267,6 +337,35 @@ class QlibResearchService:
             calibrated_until=calibrated_until,
             extra_payload=extra_payload,
         )
+        return entry, regressor, classifier
+
+    def _fit_and_calibrate_window(
+        self,
+        rows: list[tuple[datetime, datetime, np.ndarray, float]],
+        *,
+        feature_names: list[str],
+        model_type: Literal["lgb", "linear"],
+        num_boost_round: int,
+        confidence_level: float,
+        use_robust_zscore: bool = False,
+        lgb_max_depth: int = 4,
+        lgb_num_leaves: int = 12,
+        lgb_reg_alpha: float = 1.0,
+        lgb_reg_lambda: float = 5.0,
+    ) -> dict[str, Any]:
+        entry, _, _ = self._fit_and_calibrate_with_boosters(
+            rows,
+            feature_names=feature_names,
+            model_type=model_type,
+            num_boost_round=num_boost_round,
+            confidence_level=confidence_level,
+            use_robust_zscore=use_robust_zscore,
+            lgb_max_depth=lgb_max_depth,
+            lgb_num_leaves=lgb_num_leaves,
+            lgb_reg_alpha=lgb_reg_alpha,
+            lgb_reg_lambda=lgb_reg_lambda,
+        )
+        return entry
 
     def _walk_forward_horizon(
         self,
@@ -277,44 +376,86 @@ class QlibResearchService:
         n_splits: int,
         num_boost_round: int,
         confidence_level: float,
-    ) -> tuple[list[WalkForwardFoldReport], dict[str, float]]:
+        window_mode: QlibWindowMode = "expanding",
+        train_window_bars: int | None = None,
+        step_bars: int | None = None,
+        use_robust_zscore: bool = False,
+        lgb_max_depth: int = 4,
+        lgb_num_leaves: int = 12,
+        lgb_reg_alpha: float = 1.0,
+        lgb_reg_lambda: float = 5.0,
+    ) -> tuple[list[WalkForwardFoldReport], dict[str, float], list[tuple[datetime, float, float, float, float]]]:
         total = len(rows)
         folds: list[WalkForwardFoldReport] = []
+        oos_predictions: list[tuple[datetime, float, float, float, float]] = []
         if total < 90:
-            return folds, {}
+            return folds, {}, oos_predictions
 
-        min_train = max(80, int(total * 0.5))
-        oos_total = total - min_train
-        fold_size = max(1, oos_total // n_splits)
+        slices: list[tuple[int, int, int]] = []
+        win_size = 80
+        if window_mode == "rolling":
+            win_size = min(train_window_bars or max(80, int(total * 0.5)), total - 10)
+            win_size = max(80, win_size)
+            step = max(10, step_bars or max(10, (total - win_size) // max(1, n_splits)))
+            cursor = win_size
+            while cursor < total:
+                test_start_at = rows[cursor][0]
+                if sum(1 for row in rows[:cursor] if row[1] < test_start_at) >= 80:
+                    break
+                cursor += 1
+            while cursor < total:
+                test_end = min(total, cursor + step)
+                slices.append((0, cursor, test_end))
+                cursor = test_end
+        else:
+            min_train = max(80, int(total * 0.5))
+            oos_total = total - min_train
+            fold_size = max(1, oos_total // n_splits)
+            for fold_idx in range(n_splits):
+                test_start = min_train + fold_idx * fold_size
+                test_end = total if fold_idx == n_splits - 1 else min(total, test_start + fold_size)
+                if test_start >= test_end:
+                    break
+                slices.append((0, test_start, test_end))
 
-        for fold_idx in range(n_splits):
-            test_start = min_train + fold_idx * fold_size
-            test_end = total if fold_idx == n_splits - 1 else min(total, test_start + fold_size)
-            if test_start >= test_end:
-                break
+        for train_start, test_start, test_end in slices:
             test_rows = rows[test_start:test_end]
             test_start_at = test_rows[0][0]
-            eligible_train = [row for row in rows[:test_start] if row[1] < test_start_at]
+            eligible_train = [row for row in rows[train_start:test_start] if row[1] < test_start_at]
+            if window_mode == "rolling":
+                eligible_train = eligible_train[-win_size:]
             if len(eligible_train) < 80:
                 continue
             try:
-                entry = self._fit_and_calibrate_window(
+                entry, reg, clf = self._fit_and_calibrate_with_boosters(
                     eligible_train,
                     feature_names=feature_names,
                     model_type=model_type,
                     num_boost_round=num_boost_round,
                     confidence_level=confidence_level,
+                    use_robust_zscore=use_robust_zscore,
+                    lgb_max_depth=lgb_max_depth,
+                    lgb_num_leaves=lgb_num_leaves,
+                    lgb_reg_alpha=lgb_reg_alpha,
+                    lgb_reg_lambda=lgb_reg_lambda,
                 )
             except ValueError:
                 continue
 
             test_x = np.vstack([row[2] for row in test_rows])
             test_y = np.asarray([row[3] for row in test_rows], dtype=np.float64)
+            if "robust_medians" in entry and "robust_scales" in entry:
+                test_x = self._transform_robust_zscore(
+                    test_x,
+                    np.asarray(entry["robust_medians"], dtype=np.float64),
+                    np.asarray(entry["robust_scales"], dtype=np.float64),
+                    clip=float(entry.get("robust_clip", 3.0)),
+                )
             if model_type == "lgb":
-                reg = lgb.Booster(model_str=entry["regressor"])
-                clf = lgb.Booster(model_str=entry["classifier"])
-                preds = np.asarray(reg.predict(test_x, num_threads=2), dtype=np.float64)
-                raw_scores = np.asarray(clf.predict(test_x, raw_score=True, num_threads=2), dtype=np.float64)
+                reg_model = reg if reg is not None else lgb.Booster(model_str=entry["regressor"])
+                clf_model = clf if clf is not None else lgb.Booster(model_str=entry["classifier"])
+                preds = np.asarray(reg_model.predict(test_x, num_threads=2), dtype=np.float64)
+                raw_scores = np.asarray(clf_model.predict(test_x, raw_score=True, num_threads=2), dtype=np.float64)
             else:
                 preds = self._predict_ridge(
                     test_x,
@@ -329,6 +470,11 @@ class QlibResearchService:
             bound = float(entry["residual_bound"])
             lcbs = preds - bound
             actual_pos = (test_y > 0).astype(np.float64)
+
+            for idx, row in enumerate(test_rows):
+                oos_predictions.append(
+                    (row[0], float(preds[idx]), float(probs[idx]), float(lcbs[idx]), float(test_y[idx]))
+                )
 
             folds.append(
                 WalkForwardFoldReport(
@@ -355,7 +501,7 @@ class QlibResearchService:
                 "avg_brier_score": round(statistics.mean(f.brier_score for f in folds), 6),
                 "avg_lcb_coverage": round(statistics.mean(f.lcb_coverage for f in folds), 4),
             }
-        return folds, summary
+        return folds, summary, oos_predictions
 
     def _append_experiment(self, record: QlibExperimentRecord) -> None:
         self._experiment_repo.append(record)
@@ -405,6 +551,7 @@ class QlibResearchService:
             freq=request.freq,
             fee_rule=self._fee_rule,
             source_type=request.source_type,
+            label_mode=request.label_mode,
         )
         expressions = [spec.expression for spec in specs] + [label_expr]
         frame = self._bridge.fetch_features(
@@ -508,6 +655,7 @@ class QlibResearchService:
                 fee_rule=self._fee_rule,
                 source_type=request.source_type,
                 spread_pct=request.spread_pct,
+                label_mode=request.label_mode,
             )
             frame = self._bridge.fetch_features(
                 provider_uri=provider_uri,
@@ -526,25 +674,43 @@ class QlibResearchService:
                 freq=request.freq,
             )
             sample_counts[horizon.value] = len(rows)
-            folds, summary = self._walk_forward_horizon(
+            folds, summary, _oos_preds = self._walk_forward_horizon(
                 rows,
                 feature_names=feature_names,
                 model_type=request.model_type,
                 n_splits=request.n_splits,
                 num_boost_round=request.num_boost_round,
                 confidence_level=request.confidence_level,
+                window_mode=request.window_mode,
+                train_window_bars=request.train_window_bars,
+                step_bars=request.step_bars,
+                use_robust_zscore=request.use_robust_zscore,
+                lgb_max_depth=request.lgb_max_depth,
+                lgb_num_leaves=request.lgb_num_leaves,
+                lgb_reg_alpha=request.lgb_reg_alpha,
+                lgb_reg_lambda=request.lgb_reg_lambda,
             )
             folds_by_horizon[horizon.value] = folds
             if summary:
                 oos_summary[horizon.value] = summary
 
             if output_model_dir_override is not None or request.output_model_dir is not None:
+                fit_rows = (
+                    rows[-request.train_window_bars :]
+                    if request.window_mode == "rolling" and request.train_window_bars
+                    else rows
+                )
                 calibrated_entries[horizon.value] = self._fit_and_calibrate_window(
-                    rows,
+                    fit_rows,
                     feature_names=feature_names,
                     model_type=request.model_type,
                     num_boost_round=request.num_boost_round,
                     confidence_level=request.confidence_level,
+                    use_robust_zscore=request.use_robust_zscore,
+                    lgb_max_depth=request.lgb_max_depth,
+                    lgb_num_leaves=request.lgb_num_leaves,
+                    lgb_reg_alpha=request.lgb_reg_alpha,
+                    lgb_reg_lambda=request.lgb_reg_lambda,
                 )
 
         run_id = f"qlib_{uuid4().hex[:12]}"
@@ -613,6 +779,134 @@ class QlibResearchService:
             walk_forward_folds=folds_by_horizon,
             trained_model_info=trained_model_info,
         )
+
+    def run_rolling_predictions(
+        self,
+        *,
+        source_type: Literal["local_sqlite", "external_qlib"],
+        provider_uri_override: Path | None,
+        provider_uri_raw: str | None,
+        instrument: str,
+        freq: Literal["1h", "day"],
+        horizon: HoldingPeriod,
+        factor_preset: QlibFactorPreset,
+        label_mode: QlibLabelMode,
+        custom_expressions: dict[str, str],
+        model_type: Literal["lgb", "linear"],
+        window_mode: QlibWindowMode,
+        train_window_bars: int | None,
+        step_bars: int | None,
+        use_robust_zscore: bool,
+        n_splits: int,
+        num_boost_round: int,
+        lgb_max_depth: int,
+        lgb_num_leaves: int,
+        lgb_reg_alpha: float,
+        lgb_reg_lambda: float,
+        confidence_level: float,
+        spread_pct: float,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> tuple[
+        Path,
+        list[WalkForwardFoldReport],
+        list[tuple[datetime, float, float, float, float]],
+        dict[datetime, float],
+    ]:
+        """运行单标的滚动样本外预测并返回逐期预测序列与收盘价映射（供单标的择时回测消费）。"""
+        provider_uri = provider_uri_override or self._resolve_provider_uri(source_type, provider_uri_raw)
+        specs = QlibFactorLibrary.get_factors(factor_preset, freq=freq, custom_expressions=custom_expressions)
+        feature_names = [spec.name for spec in specs]
+        label_expr = QlibFactorLibrary.build_net_return_label_expression(
+            horizon=horizon,
+            freq=freq,
+            fee_rule=self._fee_rule,
+            source_type=source_type,
+            spread_pct=spread_pct,
+            label_mode=label_mode,
+        )
+        frame = self._bridge.fetch_features(
+            provider_uri=provider_uri,
+            instruments=[instrument],
+            expressions=[spec.expression for spec in specs] + [label_expr, "$close"],
+            freq=freq,
+            start_time=start_time,
+            end_time=end_time,
+            experiment_dir=self._experiment_dir,
+        )
+        values = np.asarray(frame.to_numpy(dtype=np.float64), dtype=np.float64)
+        closes_by_dt: dict[datetime, float] = {}
+        for idx in range(len(values)):
+            key = frame.index[idx]
+            raw_dt = key[1] if isinstance(key, tuple) and len(key) >= 2 else key
+            dt = self._coerce_utc_datetime(raw_dt)
+            close_val = float(values[idx, -1])
+            if math.isfinite(close_val) and close_val > 0:
+                closes_by_dt[dt] = close_val
+
+        feature_label_frame = frame.iloc[:, :-1]
+        horizon_step = QlibFactorLibrary.horizon_steps(horizon, freq)
+        rows = self._extract_matrix_rows(
+            feature_label_frame,
+            feature_count=len(feature_names),
+            horizon_step=horizon_step,
+            freq=freq,
+        )
+        folds, _summary, oos_preds = self._walk_forward_horizon(
+            rows,
+            feature_names=feature_names,
+            model_type=model_type,
+            n_splits=n_splits,
+            num_boost_round=num_boost_round,
+            confidence_level=confidence_level,
+            window_mode=window_mode,
+            train_window_bars=train_window_bars,
+            step_bars=step_bars,
+            use_robust_zscore=use_robust_zscore,
+            lgb_max_depth=lgb_max_depth,
+            lgb_num_leaves=lgb_num_leaves,
+            lgb_reg_alpha=lgb_reg_alpha,
+            lgb_reg_lambda=lgb_reg_lambda,
+        )
+        return provider_uri, folds, oos_preds, closes_by_dt
+
+    def fetch_latest_features(
+        self,
+        *,
+        source_type: Literal["local_sqlite", "external_qlib"],
+        provider_uri_override: Path | None,
+        provider_uri_raw: str | None,
+        instrument: str,
+        freq: Literal["1h", "day"],
+        factor_preset: QlibFactorPreset,
+        custom_expressions: dict[str, str] | None = None,
+    ) -> tuple[datetime, float, dict[str, float | None]]:
+        """从 Qlib 数据目录提取目标品种最新一期的特征快照与收盘价。"""
+        provider_uri = provider_uri_override or self._resolve_provider_uri(source_type, provider_uri_raw)
+        specs = QlibFactorLibrary.get_factors(factor_preset, freq=freq, custom_expressions=custom_expressions)
+        frame = self._bridge.fetch_features(
+            provider_uri=provider_uri,
+            instruments=[instrument],
+            expressions=[spec.expression for spec in specs] + ["$close"],
+            freq=freq,
+            experiment_dir=self._experiment_dir,
+        )
+        values = np.asarray(frame.to_numpy(dtype=np.float64), dtype=np.float64)
+        if len(values) == 0:
+            raise QlibDatasetError(f"在 {provider_uri} 中未找到品种 {instrument} 的有效特征数据")
+        for idx in range(len(values) - 1, -1, -1):
+            close_val = float(values[idx, -1])
+            if not math.isfinite(close_val) or close_val <= 0:
+                continue
+            key = frame.index[idx]
+            raw_dt = key[1] if isinstance(key, tuple) and len(key) >= 2 else key
+            as_of = self._coerce_utc_datetime(raw_dt)
+            feature_map: dict[str, float | None] = {}
+            for col_idx, spec in enumerate(specs):
+                val = float(values[idx, col_idx])
+                feature_map[spec.name] = val if math.isfinite(val) else None
+            return as_of, close_val, feature_map
+        raise QlibDatasetError(f"品种 {instrument} 缺少有效收盘价，无法生成信号")
 
     def list_experiments(self, *, limit: int = 50) -> list[QlibExperimentRecord]:
         """按创建时间倒序读取本地登记的 Qlib 实验记录。"""

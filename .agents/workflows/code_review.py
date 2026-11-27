@@ -1,7 +1,8 @@
-"""四维度并行 Code Review 动态工作流脚本（配合 `run_workflow` 使用）。
+"""五维度并行 Code Review 动态工作流脚本（配合 `run_workflow` 使用）。
 
-覆盖架构实现、后端基础与接口质量、后端服务质量与性能、前端质量与性能四个只读审查维度，
-对照 `CLAUDE.md`、`agents/review/AGENT.md` 与 `agents/architecture/AGENT.md` 审查当前工作区改动。
+覆盖架构实现、后端基础与接口质量、后端服务质量与性能、前端质量与性能、代码风格五个只读审查维度，
+对照 `CLAUDE.md`、`agents/review/AGENT.md`、`agents/architecture/AGENT.md`
+与 `agents/coding/AGENT.md` 审查当前工作区改动。
 """
 
 import json
@@ -19,7 +20,7 @@ FINDING_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "severity": {"type": "string", "enum": ["blocker", "major", "minor"]},
-                    "category": {"type": "string", "enum": ["architecture", "quality", "performance"]},
+                    "category": {"type": "string", "enum": ["architecture", "quality", "performance", "style"]},
                     "file": {"type": "string"},
                     "line": {"type": "string"},
                     "title": {"type": "string"},
@@ -38,9 +39,11 @@ FINDING_SCHEMA = {
 COMMON_RULES = """
 重要约束：
 1. 本次任务仅执行只读 Code Review，严禁修改任何文件！
-2. 仅审查当前工作区改动（通过 `git status --short` 与 `git diff` 识别全部修改与新增未跟踪源码文件）。若对应审查范围无改动，直接返回空 `findings` 并在 `summary` 说明。
+2. 仅审查当前工作区改动（通过 `git status --short` 与 `git diff` 识别全部修改与新增未跟踪源码文件）。
+   若对应审查范围无改动，直接返回空 `findings` 并在 `summary` 说明。
 3. 务必先检查实际代码和行号，只报告经源码证实的真实问题，不要猜测或编造。
-4. 每条 finding 必须给出精确的 `file`、`line`（如 `L45-L62`）、`severity`（`blocker` / `major` / `minor`）、`category`（`architecture` / `quality` / `performance`）、`title`、`detail` 和可执行的 `fix`。
+4. 每条 finding 必须给出精确的 `file`、`line`（如 `L45-L62`）、`severity`（`blocker` / `major` / `minor`）、
+   `category`（`architecture` / `quality` / `performance` / `style`）、`title`、`detail` 和可执行的 `fix`。
 5. 优先使用 `batch_search`（git diff / text / regex）和并行 `read_file` 批量读取文件，保持高效。
 """
 
@@ -102,6 +105,38 @@ REVIEWS = [
 3. **轮询冗余与网络请求**：是否存在重复轮询、页面不可见时继续高频轮询、静态接口重复拉取或请求风暴。
 4. **React 重渲染与内存边界**：`useEffect` 依赖循环或不稳定引用、单轮轮询多次分散 `setState` 导致整树重渲染、大列表无分页/虚拟化渲染、未清理的定时器或事件监听器。
 5. **测试覆盖**：`web/src/__tests__/` 是否覆盖关键新增交互与边界。
+
+完成后调用 `finish` 返回结构化结果。""",
+    },
+    {
+        "role": "代码风格审查",
+        "dimension": "代码风格（Python / 前端 / 配置）",
+        "prompt": f"""你正在对 `{WORKSPACE_ROOT}` 的当前工作区改动执行【代码风格】维度 Code Review
+（范围：本次改动的全部 Python 文件、`web/` 前端文件及配置文件）。
+{COMMON_RULES}
+
+请对照 `CLAUDE.md` 与 `agents/coding/AGENT.md` 重点审查本次改动的全部修改与新增文件：
+1. **Python 命名规范**：
+   - 模块与包使用 `lower_with_under`（内部 `_lower_with_under`）；
+   - 类与异常使用 `CapWords`（内部 `_CapWords`）；
+   - 函数、方法、参数、局部变量与非常量变量使用 `lower_with_under`
+     （保护 `_lower_with_under`，私有 `__lower_with_under`）；
+   - 全局与类常量使用 `CAPS_WITH_UNDER`（内部 `_CAPS_WITH_UNDER`）。
+2. **Python 类组织与成员顺序**（非豁免模块，豁免路径仅 `main.py`、`src/routers/**`、`tests/**`）：
+   - 是否以类管理业务代码，无顶层业务函数；
+   - 类体成员顺序是否严格遵守：
+     1) 私有类变量 `_name`/`__name` -> 2) 公开类变量
+     -> 3) 私有方法 `def _name`/`def __name` -> 4) 公开方法 `def name`。
+3. **中文注释与文档字符串规范**：
+   - 新增/修改的 Python 代码注释与 docstring 是否全部使用中文；
+   - 是否误含计划文档条款编号（如 `§1.0`、`§9.2`、`G-1`、`G-2` 等）；
+   - 是否存在被注释掉的死代码、过时或无信息量注释。
+4. **格式、类型与配置风格**：
+   - Python 代码是否符合 Python 3.12+ 现代类型注解风格（如 `X | None`、`list[T]`）、import 排序与格式整洁
+     （可只读检查 `uv run ruff check` / `uv run ruff format --check` 对改动文件的输出，严禁自动修改文件）；
+   - `.env.example` 等配置文件是否按统一 `# ===...===` 功能块清晰分节；
+   - `web/` 前端代码（如有改动）是否命名一致、避免滥用 `any`、无残留调试 `console.log` 或无关格式化噪声。
+5. **改动收敛度与风格一致性**：新增代码是否与周边既有代码风格保持一致，是否存在无关重排、未使用导入/变量或多余嵌套。
 
 完成后调用 `finish` 返回结构化结果。""",
     },

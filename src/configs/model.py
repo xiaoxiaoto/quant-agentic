@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -10,17 +10,24 @@ class ModelSettings(BaseSettings):
     """数值预测模型、时序基础模型与新闻风险大模型配置。"""
 
     lightgbm_model_dir: str | None = None
-    predictor_backend: Literal["auto", "lightgbm", "qlib", "heuristic"] = "auto"
+    predictor_backend: Literal["auto", "lightgbm", "qlib", "timesfm", "heuristic"] = "auto"
     qlib_enabled: bool = False
     qlib_provider_uri: str = "data/qlib_data"
     qlib_external_provider_uri: str | None = None
     qlib_region: str = "cn"
     qlib_model_dir: str | None = None
     qlib_experiment_dir: str = "data/qlib_experiments"
+    qlib_au9999_buy_thresh: float = Field(default=0.001, allow_inf_nan=False)
+    qlib_au9999_sell_thresh: float = Field(default=-0.0005, allow_inf_nan=False)
+    qlib_au9999_trade_unit_grams: float = Field(default=10.0, gt=0.0, allow_inf_nan=False)
+    qlib_macro_csv_dir: str | None = None
     timesfm_enabled: bool = True
     timesfm_checkpoint: str = "google/timesfm-3.0-pytorch"
     timesfm_device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     timesfm_context_length: int = Field(default=512, ge=32, le=15360)
+    timesfm_model_dir: str | None = None
+    timesfm_dataset_dir: str = "data/timesfm_datasets"
+    timesfm_experiment_dir: str = "data/timesfm_experiments"
 
     openai_base_url: str = Field(
         default="https://api.openai.com/v1",
@@ -47,10 +54,24 @@ class ModelSettings(BaseSettings):
     news_sync_interval_seconds: float = Field(default=300.0, ge=30.0, le=3600.0, allow_inf_nan=False)
     news_sync_page_size: int = Field(default=10, ge=1, le=50)
 
-    @field_validator("lightgbm_model_dir", "qlib_external_provider_uri", "qlib_model_dir", mode="before")
+    @field_validator(
+        "lightgbm_model_dir",
+        "qlib_external_provider_uri",
+        "qlib_model_dir",
+        "qlib_macro_csv_dir",
+        "timesfm_model_dir",
+        mode="before",
+    )
     @classmethod
     def _normalize_empty_model_dir(cls, value: object) -> object:
         """将空白字符串环境变量归一化为 None。"""
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @model_validator(mode="after")
+    def _validate_qlib_thresholds(self) -> "ModelSettings":
+        """校验默认 Qlib 择时开仓与平仓阈值顺序合法。"""
+        if self.qlib_au9999_buy_thresh < self.qlib_au9999_sell_thresh:
+            raise ValueError("qlib_au9999_buy_thresh 不得小于 qlib_au9999_sell_thresh")
+        return self

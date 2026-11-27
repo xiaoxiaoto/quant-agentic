@@ -12,13 +12,20 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from src.clients.jd_gold import JDGoldError
-from src.contracts.domains.market_bar import KLineBar, MarketBarCollectorStatus, TimeSharingPoint
+from src.contracts.domains.market_bar import (
+    XAUUSD_MERGED_SOURCE,
+    XAUUSD_PRODUCT,
+    KLineBar,
+    MarketBarCollectorStatus,
+    TimeSharingPoint,
+)
 from src.contracts.domains.reference_quote import ReferenceProductCatalog
 from src.contracts.enums.jd_gold import IndexSymbol, KLineType, TimeSharingType
 from src.contracts.exceptions import StorageError
 from src.repositories.database import SQLiteDatabase
 from src.repositories.market_bar import MarketBarRepository
 from src.services.jd_gold.gateway import JDGoldGateway
+from src.services.market.xauusd_merge import XauusdBarMerge
 
 
 class MarketBarCollector:
@@ -447,13 +454,19 @@ class MarketBarCollector:
         product_code: str,
         interval: str,
         *,
-        source: str | None = None,
+        source: str | tuple[str, ...] | None = None,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
-        limit: int = 500,
+        limit: int | None = 500,
     ) -> list[KLineBar]:
-        """查询已持久化的多周期 K 线序列。"""
+        """查询多周期 K 线，XAUUSD 默认返回合并序列。"""
         ReferenceProductCatalog.get(product_code)
+        if source == XAUUSD_MERGED_SOURCE or (source is None and product_code == XAUUSD_PRODUCT):
+            if product_code != XAUUSD_PRODUCT:
+                raise ValueError("合并行情仅支持 WG-XAUUSD")
+            return XauusdBarMerge(self._repository).query(
+                interval, start_time=start_time, end_time=end_time, limit=limit
+            )
         return self._repository.query_klines(
             product_code,
             interval,

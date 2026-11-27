@@ -986,6 +986,7 @@ class LiveTradingService:
     def get_status(self) -> dict[str, object]:
         """返回实盘风控状态、急停状态、交易时段、提醒统计、本地账本快照及京东授权摘要。"""
         now = self._now()
+        now_ts = now.timestamp()
         with self._lock:
             risk_state = self._risk_state
             last_recon = self._last_reconciliation
@@ -993,9 +994,10 @@ class LiveTradingService:
         alerts = self._alerts.list_alerts(limit=100)
         pending_alerts = sum(1 for item in alerts if item.state in (AlertState.ALERT_SENT, AlertState.USER_CONFIRMED))
         token_present = bool(auth_state.access_token.get_secret_value())
-        token_valid = token_present and (
-            auth_state.actual_expires_at is None or auth_state.actual_expires_at > now.timestamp()
-        )
+        actual_expiry = auth_state.actual_expires_at
+        usable_seconds = max(0, int(actual_expiry - now_ts)) if actual_expiry is not None else None
+        token_valid = token_present and (actual_expiry is None or actual_expiry > now_ts)
+        token_expired = token_present and (actual_expiry is not None and actual_expiry <= now_ts)
         return {
             "risk_state": risk_state.value,
             "kill_switch_active": self._execution.is_kill_switch_active(),
@@ -1007,6 +1009,9 @@ class LiveTradingService:
             "total_alerts": len(alerts),
             "pending_alerts": pending_alerts,
             "jd_logged_in": token_valid,
+            "jd_token_expired": token_expired,
+            "jd_usable_seconds": usable_seconds,
+            "jd_token_expires_at": actual_expiry,
             "last_reconciliation": last_recon.model_dump(mode="json") if last_recon is not None else None,
             "snapshot": self._ledger.take_snapshot(now).model_dump(mode="json"),
         }

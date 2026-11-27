@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -29,17 +30,20 @@ class QlibAgent:
         name for name in FeatureSet.model_fields if name not in {"quote_id", "as_of"}
     ]
 
-    def __init__(self, model_dir: str | Path) -> None:
+    def __init__(self, model_dir: str | Path, *, allow_non_serving: bool = False) -> None:
         manifest_path = Path(model_dir) / "manifest.json"
         if not manifest_path.exists():
             raise ValueError(f"未找到 Qlib 模型清单文件：{manifest_path}")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("version") != self._VERSION:
             raise ValueError("Qlib 模型产物版本不匹配")
-        if not manifest.get("serving_compatible", False):
+        serving_compatible = bool(manifest.get("serving_compatible", False))
+        if not serving_compatible and not allow_non_serving:
             raise ValueError("该 Qlib 产物为离线研究模型（serving_compatible=false），禁止直接接入线上推理")
         features = manifest.get("features")
-        if not isinstance(features, list) or not features or any(name not in self._FEATURE_NAMES for name in features):
+        if not isinstance(features, list) or not features or any(not isinstance(name, str) for name in features):
+            raise ValueError("Qlib 模型特征列表无效")
+        if serving_compatible and any(name not in self._FEATURE_NAMES for name in features):
             raise ValueError("Qlib 模型特征列表无效或与 FeatureSet 不兼容")
         model_type = manifest.get("model_type")
         if model_type not in {"lgb", "linear"}:
@@ -52,6 +56,7 @@ class QlibAgent:
         self._run_id: str = str(manifest.get("run_id", "unknown"))
         self._source_type: str = str(manifest.get("source_type", "local_sqlite"))
         self._factor_preset: str = str(manifest.get("factor_preset", "gold_core"))
+        self._serving_compatible: bool = serving_compatible
         self._lgb_models: dict[HoldingPeriod, tuple[lgb.Booster, lgb.Booster, dict[str, Any]]] = {}
         self._linear_models: dict[HoldingPeriod, dict[str, Any]] = {}
 
@@ -60,7 +65,7 @@ class QlibAgent:
             raise ValueError("Qlib 模型产物缺少可用持有期")
 
         for horizon_key, entry in horizons.items():
-            self._validate_horizon_entry(entry)
+            self._validate_horizon_entry(entry, feature_count=len(self._features))
             horizon = HoldingPeriod(horizon_key)
             if self._model_type == "lgb":
                 regressor = lgb.Booster(model_str=entry["regressor"])
@@ -94,7 +99,7 @@ class QlibAgent:
                 self._linear_models[horizon] = entry
 
     @staticmethod
-    def _validate_horizon_entry(entry: Any) -> None:
+    def _validate_horizon_entry(entry: Any, *, feature_count: int) -> None:
         if not isinstance(entry, dict):
             raise ValueError("Qlib 持有期条目格式无效")
         for key in ("probability_slope", "probability_intercept", "residual_bound", "confidence_level"):
@@ -125,6 +130,34 @@ class QlibAgent:
             or trained_until >= calibrated_until
         ):
             raise ValueError("Qlib 产物时间边界无效")
+        has_medians = entry.get("robust_medians") is not None
+        has_scales = entry.get("robust_scales") is not None
+        if has_medians != has_scales:
+            raise ValueError("Qlib 稳健归一化参数 robust_medians 与 robust_scales 必须成对存在")
+        if has_medians and has_scales:
+            medians = entry["robust_medians"]
+            scales = entry["robust_scales"]
+            if (
+                not isinstance(medians, list)
+                or not isinstance(scales, list)
+                or len(medians) != feature_count
+                or len(scales) != feature_count
+            ):
+                raise ValueError("Qlib 稳健归一化参数维度与特征数不匹配")
+            try:
+                med_vals = [float(v) for v in medians]
+                scale_vals = [float(v) for v in scales]
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Qlib 稳健归一化参数必须为数值") from exc
+            if not all(math.isfinite(v) for v in (*med_vals, *scale_vals)) or any(v < 0 for v in scale_vals):
+                raise ValueError("Qlib 稳健归一化参数包含非有限数或负尺度")
+        if entry.get("robust_clip") is not None:
+            try:
+                clip_val = float(entry["robust_clip"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Qlib 稳健归一化截断阈值 robust_clip 必须为数值") from exc
+            if not math.isfinite(clip_val) or clip_val <= 0:
+                raise ValueError("Qlib 稳健归一化截断阈值 robust_clip 必须为有限正数")
 
     def _extract_vector(self, features: FeatureSet) -> np.ndarray:
         values: list[float] = []
@@ -171,6 +204,79 @@ class QlibAgent:
         if rank > len(actual):
             raise ValueError("校准样本不足以支持指定置信水平")
         return float(np.sort(residuals)[rank - 1])
+
+    def _extract_feature_map(self, feature_values: Mapping[str, float | None]) -> np.ndarray:
+        values: list[float] = []
+        for name in self._features:
+            value = feature_values.get(name)
+            if value is None:
+                values.append(float("nan"))
+                continue
+            numeric = float(value)
+            if math.isinf(numeric):
+                raise ValueError(f"特征 {name} 必须为有限数或缺失值")
+            values.append(numeric)
+        return np.array([values], dtype=np.float64)
+
+    @staticmethod
+    def _apply_robust_norm(vector: np.ndarray, entry: dict[str, Any]) -> np.ndarray:
+        medians = entry.get("robust_medians")
+        scales = entry.get("robust_scales")
+        if not isinstance(medians, list) or not isinstance(scales, list):
+            return vector
+        med_arr = np.asarray(medians, dtype=np.float64)
+        scale_arr = np.asarray(scales, dtype=np.float64)
+        clip_val = float(entry.get("robust_clip", 3.0))
+        filled = np.where(np.isfinite(vector), vector, med_arr)
+        normed = (filled - med_arr) / np.where(scale_arr > 1e-12, scale_arr, 1.0)
+        return np.clip(normed, -clip_val, clip_val)
+
+    def _predict_vector(self, vector: np.ndarray, *, as_of: datetime, horizon: HoldingPeriod) -> ModelPrediction:
+        if self._model_type == "lgb":
+            if horizon not in self._lgb_models:
+                raise ValueError(f"没有 {horizon.value} 期限的 Qlib 模型")
+            regressor, classifier, metadata = self._lgb_models[horizon]
+        else:
+            if horizon not in self._linear_models:
+                raise ValueError(f"没有 {horizon.value} 期限的 Qlib 模型")
+            metadata = self._linear_models[horizon]
+            regressor = None
+            classifier = None
+
+        calibrated_until = datetime.fromisoformat(str(metadata["calibrated_until"]))
+        if as_of.utcoffset() is None or as_of <= calibrated_until:
+            raise ValueError("推理时间必须晚于 Qlib 模型校准标签结束时间")
+
+        norm_vector = self._apply_robust_norm(vector, metadata)
+        if self._model_type == "lgb" and regressor is not None and classifier is not None:
+            expected = float(np.asarray(regressor.predict(norm_vector, num_threads=2))[0])
+            raw_score = float(np.asarray(classifier.predict(norm_vector, raw_score=True, num_threads=2))[0])
+            raw_imp = regressor.feature_importance(importance_type="gain")
+            total = float(np.sum(raw_imp))
+            importance = {
+                name: float(val) / total if total > 0 else 0.0
+                for name, val in zip(self._features, raw_imp, strict=True)
+            }
+        else:
+            expected, raw_score, importance = self._predict_linear(norm_vector, metadata)
+
+        probability = float(
+            expit(float(metadata["probability_slope"]) * raw_score + float(metadata["probability_intercept"]))
+        )
+        bound = float(metadata["residual_bound"])
+        if not all(math.isfinite(val) for val in (expected, probability, bound)):
+            raise ValueError("Qlib 模型输出包含非有限数")
+
+        return ModelPrediction(
+            horizon=horizon,
+            expected_net_return=expected,
+            net_return_lcb=expected - bound,
+            win_probability=probability,
+            uncertainty=bound,
+            feature_importance=importance,
+            model_version=self._VERSION,
+            is_calibrated=True,
+        )
 
     def _predict_linear(self, vector: np.ndarray, entry: dict[str, Any]) -> tuple[float, float, dict[str, float]]:
         means = np.asarray(entry["feature_means"], dtype=np.float64)
@@ -266,55 +372,31 @@ class QlibAgent:
 
     def predict(self, features: FeatureSet, horizon: HoldingPeriod) -> ModelPrediction:
         """基于 Qlib 校准产物输出目标持有期的扣费净收益预测。"""
-        if self._model_type == "lgb":
-            if horizon not in self._lgb_models:
-                raise ValueError(f"没有 {horizon.value} 期限的 Qlib 模型")
-            regressor, classifier, metadata = self._lgb_models[horizon]
-        else:
-            if horizon not in self._linear_models:
-                raise ValueError(f"没有 {horizon.value} 期限的 Qlib 模型")
-            metadata = self._linear_models[horizon]
-            regressor = None
-            classifier = None
-
-        calibrated_until = datetime.fromisoformat(str(metadata["calibrated_until"]))
-        if features.as_of.utcoffset() is None or features.as_of <= calibrated_until:
-            raise ValueError("推理时间必须晚于 Qlib 模型校准标签结束时间")
-
         vector = self._extract_vector(features)
-        if self._model_type == "lgb" and regressor is not None and classifier is not None:
-            expected = float(np.asarray(regressor.predict(vector, num_threads=2))[0])
-            raw_score = float(np.asarray(classifier.predict(vector, raw_score=True, num_threads=2))[0])
-            raw_imp = regressor.feature_importance(importance_type="gain")
-            total = float(np.sum(raw_imp))
-            importance = {
-                name: float(val) / total if total > 0 else 0.0
-                for name, val in zip(self._features, raw_imp, strict=True)
-            }
-        else:
-            expected, raw_score, importance = self._predict_linear(vector, metadata)
+        return self._predict_vector(vector, as_of=features.as_of, horizon=horizon)
 
-        probability = float(
-            expit(float(metadata["probability_slope"]) * raw_score + float(metadata["probability_intercept"]))
-        )
-        bound = float(metadata["residual_bound"])
-        if not all(math.isfinite(val) for val in (expected, probability, bound)):
-            raise ValueError("Qlib 模型输出包含非有限数")
-
-        return ModelPrediction(
-            horizon=horizon,
-            expected_net_return=expected,
-            net_return_lcb=expected - bound,
-            win_probability=probability,
-            uncertainty=bound,
-            feature_importance=importance,
-            model_version=self._VERSION,
-            is_calibrated=True,
-        )
+    def predict_feature_map(
+        self,
+        feature_values: Mapping[str, float | None],
+        *,
+        as_of: datetime,
+        horizon: HoldingPeriod,
+    ) -> ModelPrediction:
+        """基于特征名到数值的映射执行推理（用于 Au99.99 日频盘前信号等非 FeatureSet 预设）。"""
+        vector = self._extract_feature_map(feature_values)
+        return self._predict_vector(vector, as_of=as_of, horizon=horizon)
 
     def get_model_info(self) -> dict[str, Any]:
         """返回 Qlib 产物版本、实验来源及各持有期校准摘要。"""
-        hidden = {"regressor", "classifier", "weights", "feature_means", "feature_stds"}
+        hidden = {
+            "regressor",
+            "classifier",
+            "weights",
+            "feature_means",
+            "feature_stds",
+            "robust_medians",
+            "robust_scales",
+        }
         horizons_info: dict[str, Any] = {}
         if self._model_type == "lgb":
             for horizon, (_, _, entry) in self._lgb_models.items():
@@ -329,6 +411,8 @@ class QlibAgent:
             "run_id": self._run_id,
             "source_type": self._source_type,
             "factor_preset": self._factor_preset,
+            "features": list(self._features),
+            "serving_compatible": self._serving_compatible,
             "device": "cpu",
             "production_approved": False,
             "horizons": horizons_info,

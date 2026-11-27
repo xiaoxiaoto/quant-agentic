@@ -1,5 +1,7 @@
 """回测、模拟交易、实盘辅助与提醒执行接口数据传输模型。"""
 
+from typing import Literal
+
 from pydantic import AwareDatetime, BaseModel, Field, NonNegativeFloat, PositiveFloat, PositiveInt, model_validator
 
 from src.contracts.domains.account import OrderEvent
@@ -140,3 +142,31 @@ class AlertExecuteRequest(BaseModel):
         if (self.filled_grams is None) != (self.filled_price is None):
             raise ValueError("filled_grams 与 filled_price 必须同时提供或同时留空")
         return self
+
+
+class FifoLotItem(BaseModel):
+    """先进先出在持批次明细记录。"""
+
+    client_order_id: str = Field(description="委托单唯一标识")
+    bank_order_id: str | None = Field(default=None, description="银行官方订单流水号")
+    direction: TradeDirection = Field(description="交易方向")
+    lot_status: Literal["HOLDING", "PARTIAL", "CLOSED", "SELL", "UNFILLED"] = Field(
+        description="在持状态：HOLDING(在持)/PARTIAL(部分卖出)/CLOSED(已平仓)/SELL(卖出平仓)/UNFILLED(未成交)"
+    )
+    requested_grams: float = Field(description="原始委托克重（克）")
+    filled_grams: float | None = Field(default=None, description="实际成交克重（克）")
+    remaining_grams: float = Field(default=0.0, description="当前在持剩余克重（克）")
+    execution_price: float | None = Field(default=None, description="成交价格（元/克）")
+    fee: float | None = Field(default=None, description="手续费（元）")
+    lot_pnl: float | None = Field(default=None, description="按参考价重估浮动盈亏（元）")
+    timestamp: str | None = Field(default=None, description="成交时间字符串（ISO 或本地格式）")
+
+
+class FifoSummaryResponse(BaseModel):
+    """影子账本先进先出匹配汇总与切片明细。"""
+
+    open_position_cost: float = Field(description="当前在持批次总成本（元）")
+    open_grams: float = Field(description="当前在持总克重（克）")
+    open_lot_count: int = Field(description="当前在持批次数")
+    total_orders: int = Field(description="总历史订单记录数")
+    items: list[FifoLotItem] = Field(description="切片订单明细列表")

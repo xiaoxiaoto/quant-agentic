@@ -153,12 +153,12 @@ export function PortfolioView({
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={onInitLedgerFromJd}
               disabled={busyAction !== null || !liveStatus?.jd_logged_in || liveFailed}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-300 transition hover:bg-emerald-500/20 hover:border-emerald-400 disabled:opacity-40"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-300 transition hover:bg-emerald-500/20 hover:border-emerald-400 disabled:opacity-40 whitespace-nowrap"
             >
               <DatabaseBackup className="size-3.5" />
               {busyAction === "init-ledger-jd" ? "重置中…" : "按实盘重置影子账本"}
@@ -167,13 +167,25 @@ export function PortfolioView({
               type="button"
               onClick={onReconcileJd}
               disabled={busyAction !== null || !liveStatus?.jd_logged_in || liveFailed}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-200 transition hover:bg-amber-500/20 hover:border-amber-400 disabled:opacity-40"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-200 transition hover:bg-amber-500/20 hover:border-amber-400 disabled:opacity-40 whitespace-nowrap"
             >
               <Scale className="size-3.5" />
               {busyAction === "reconcile-jd" ? "对账中…" : "京东持仓对账"}
             </button>
           </div>
         </div>
+
+        {liveStatus?.jd_token_expired && (
+          <div className="mb-4 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-xs text-rose-200">
+            <div className="flex items-center gap-2 font-semibold text-rose-300">
+              <span className="size-2 rounded-full bg-rose-400 animate-pulse" />
+              京东登录凭据已到期失效
+            </div>
+            <p className="mt-1 text-slate-300">
+              实盘持仓查询与自动同步已受阻。请在终端执行 <code className="text-amber-300 bg-black/40 px-1.5 py-0.5 rounded font-mono">uv run python main.py auth login</code> 重新扫码或短信续期。
+            </p>
+          </div>
+        )}
 
         {!jdHoldings ? (
           <div className="rounded-xl border border-white/[0.05] bg-black/40 py-8 text-center text-xs text-slate-400">
@@ -266,36 +278,36 @@ export function PortfolioView({
                   <span>签约行明细</span>
                   <span>共 {jdHoldings.holdingList.length}</span>
                 </div>
-                <table className="data-table w-full text-left text-xs">
+                <table className="data-table w-full text-left text-xs whitespace-nowrap">
                   <thead className="bg-black/50 text-[11px] text-slate-400">
                     <tr>
-                      <th className="px-4 py-2.5">托管行</th>
-                      <th className="px-4 py-2.5">银行代码</th>
-                      <th className="px-4 py-2.5">持有克重</th>
-                      <th className="px-4 py-2.5">持仓均价</th>
-                      <th className="px-4 py-2.5">持仓总成本</th>
-                      <th className="px-4 py-2.5 text-right">官方累计收益</th>
+                      <th className="px-4 py-2.5 whitespace-nowrap">托管行</th>
+                      <th className="px-4 py-2.5 whitespace-nowrap">银行代码</th>
+                      <th className="px-4 py-2.5 whitespace-nowrap">持有克重</th>
+                      <th className="px-4 py-2.5 whitespace-nowrap">持仓均价</th>
+                      <th className="px-4 py-2.5 whitespace-nowrap">持仓总成本</th>
+                      <th className="px-4 py-2.5 text-right whitespace-nowrap">官方累计收益</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/[0.04]">
                     {jdHoldings.holdingList.map((item) => (
                       <tr key={item.bankCode} className="hover:bg-amber-500/[0.03] transition-colors">
-                        <td className="px-4 py-2.5 font-sans font-medium text-slate-200">{item.bankName}</td>
-                        <td className="px-4 py-2.5 text-slate-400">
-                          <span className="data-label border-white/10 bg-white/[0.03] text-slate-300">
+                        <td className="px-4 py-2.5 font-sans font-medium text-slate-200 whitespace-nowrap">{item.bankName}</td>
+                        <td className="px-4 py-2.5 text-slate-400 whitespace-nowrap">
+                          <span className="data-label border-white/10 bg-white/[0.03] text-slate-300 whitespace-nowrap">
                             {item.bankCode}
                           </span>
                         </td>
-                        <td className="px-4 py-2.5 font-semibold text-amber-300">{item.totalGram.toFixed(4)} g</td>
-                        <td className="px-4 py-2.5 text-slate-300">¥{item.avgCostPrice.toFixed(2)}</td>
-                        <td className="px-4 py-2.5 text-slate-300">
+                        <td className="px-4 py-2.5 font-semibold text-amber-300 whitespace-nowrap">{item.totalGram.toFixed(4)} g</td>
+                        <td className="px-4 py-2.5 text-slate-300 whitespace-nowrap">¥{item.avgCostPrice.toFixed(2)}</td>
+                        <td className="px-4 py-2.5 text-slate-300 whitespace-nowrap">
                           ¥{(item.totalGram * item.avgCostPrice).toLocaleString("zh-CN", {
                             minimumFractionDigits: 2,
                             maximumFractionDigits: 2,
                           })}
                         </td>
                         <td
-                          className={`px-4 py-2.5 text-right font-medium ${
+                          className={`px-4 py-2.5 text-right font-medium whitespace-nowrap ${
                             item.totalIncome === null ? "text-slate-400" : item.totalIncome >= 0 ? "text-emerald-300" : "text-rose-300"
                           }`}
                         >
@@ -550,17 +562,17 @@ export function PortfolioView({
           </div>
         ) : (
           <div className="max-h-[480px] overflow-auto rounded-xl border border-white/[0.06] bg-[#101722]">
-            <table className="data-table w-full text-left text-xs">
+            <table className="data-table w-full text-left text-xs whitespace-nowrap">
               <thead className="sticky top-0 bg-black/80 backdrop-blur-md text-[11px] text-slate-400 border-b border-white/[0.06]">
                 <tr>
-                  <th className="px-4 py-2.5">流水单号</th>
-                  <th className="px-4 py-2.5">方向</th>
-                  <th className="px-4 py-2.5">FIFO状态</th>
-                  <th className="px-4 py-2.5">成交克重</th>
-                  <th className="px-4 py-2.5">成交价</th>
-                  <th className="px-4 py-2.5">手续费</th>
-                  <th className="px-4 py-2.5">当前浮盈</th>
-                  <th className="px-4 py-2.5 text-right">时间戳 (CST)</th>
+                  <th className="px-4 py-2.5 whitespace-nowrap">流水单号</th>
+                  <th className="px-4 py-2.5 whitespace-nowrap">方向</th>
+                  <th className="px-4 py-2.5 whitespace-nowrap">FIFO状态</th>
+                  <th className="px-4 py-2.5 whitespace-nowrap">成交克重</th>
+                  <th className="px-4 py-2.5 whitespace-nowrap">成交价</th>
+                  <th className="px-4 py-2.5 whitespace-nowrap">手续费</th>
+                  <th className="px-4 py-2.5 whitespace-nowrap">当前浮盈</th>
+                  <th className="px-4 py-2.5 text-right whitespace-nowrap">时间戳 (CST)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
@@ -573,14 +585,14 @@ export function PortfolioView({
                         isOpen ? "bg-amber-500/[0.02]" : ""
                       }`}
                     >
-                      <td className="px-4 py-2.5 text-slate-300" title={ord.client_order_id}>
+                      <td className="px-4 py-2.5 text-slate-300 whitespace-nowrap" title={ord.client_order_id}>
                         <span className="font-mono text-xs text-slate-200">
                           {ord.bank_order_id || ord.client_order_id}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5">
+                      <td className="px-4 py-2.5 whitespace-nowrap">
                         <span
-                          className={`data-label ${
+                          className={`data-label whitespace-nowrap ${
                             ord.direction === "BUY"
                               ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
                               : "border-rose-500/40 bg-rose-500/10 text-rose-300"
@@ -589,29 +601,29 @@ export function PortfolioView({
                           {ord.direction === "BUY" ? "买入" : "卖出"}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5">
+                      <td className="px-4 py-2.5 whitespace-nowrap">
                         {lotStatus === "HOLDING" && (
-                          <span className="data-label border-amber-500/40 bg-amber-500/15 text-amber-200">
+                          <span className="data-label border-amber-500/40 bg-amber-500/15 text-amber-200 whitespace-nowrap">
                             在持
                           </span>
                         )}
                         {lotStatus === "PARTIAL" && (
-                          <span className="data-label border-amber-500/30 bg-amber-500/10 text-amber-300">
+                          <span className="data-label border-amber-500/30 bg-amber-500/10 text-amber-300 whitespace-nowrap">
                             部分卖出 ({remainingGrams.toFixed(4)}g)
                           </span>
                         )}
                         {lotStatus === "CLOSED" && (
-                          <span className="data-label border-white/10 bg-white/[0.03] text-slate-400">
+                          <span className="data-label border-white/10 bg-white/[0.03] text-slate-400 whitespace-nowrap">
                             已平仓
                           </span>
                         )}
                         {lotStatus === "SELL" && (
-                          <span className="data-label border-white/10 bg-white/[0.03] text-slate-400">
+                          <span className="data-label border-white/10 bg-white/[0.03] text-slate-400 whitespace-nowrap">
                             卖出平仓
                           </span>
                         )}
                         {lotStatus === "UNFILLED" && (
-                          <span className="data-label border-slate-500/30 bg-slate-500/10 text-slate-400">
+                          <span className="data-label border-slate-500/30 bg-slate-500/10 text-slate-400 whitespace-nowrap">
                             {ord.state === "REJECTED"
                               ? "已拒绝"
                               : ord.state === "CANCELED"
@@ -620,17 +632,17 @@ export function PortfolioView({
                           </span>
                         )}
                       </td>
-                      <td className="px-4 py-2.5 font-semibold text-slate-200">
+                      <td className="px-4 py-2.5 font-semibold text-slate-200 whitespace-nowrap">
                         {(ord.filled_grams ?? ord.requested_grams).toFixed(4)} g
                       </td>
-                      <td className="px-4 py-2.5 text-amber-300 font-semibold">
+                      <td className="px-4 py-2.5 text-amber-300 font-semibold whitespace-nowrap">
                         {ord.execution_price != null ? `¥${ord.execution_price.toFixed(2)}` : "—"}
                       </td>
-                      <td className="px-4 py-2.5 text-slate-400">
+                      <td className="px-4 py-2.5 text-slate-400 whitespace-nowrap">
                         {ord.fee != null ? `¥${ord.fee.toFixed(2)}` : "—"}
                       </td>
                       <td
-                        className={`px-4 py-2.5 font-semibold ${
+                        className={`px-4 py-2.5 font-semibold whitespace-nowrap ${
                           lotPnl === null
                             ? "text-slate-600"
                             : lotPnl >= 0
@@ -640,7 +652,7 @@ export function PortfolioView({
                       >
                         {lotPnl !== null ? `${lotPnl >= 0 ? "+" : "-"}¥${Math.abs(lotPnl).toFixed(2)}` : "—"}
                       </td>
-                      <td className="px-4 py-2.5 text-right text-slate-400 text-[11px]">
+                      <td className="px-4 py-2.5 text-right text-slate-400 text-[11px] whitespace-nowrap">
                         {(ord.bank_event_at ?? ord.received_at)
                           ? new Date((ord.bank_event_at ?? ord.received_at) as string).toLocaleString("zh-CN", {
                               hour12: false,

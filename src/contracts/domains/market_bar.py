@@ -1,8 +1,45 @@
 """多周期 K 线与分时行情采集领域模型。"""
 
-from typing import Literal
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Literal, NamedTuple
 
 from pydantic import AwareDatetime, BaseModel, Field, FiniteFloat
+
+ExternalBarSource = Literal["sge_daily", "dukascopy", "histdata", "macro_daily"]
+ExternalKLineSource = Literal["sge_daily", "dukascopy_bid", "dukascopy_ask", "histdata_bid", "macro_daily"]
+XauusdOrigin = Literal["dukascopy_bid", "histdata_bid", "jd_public_kline"]
+KLineSource = Literal["jd_public_kline", "jd_sim_kline", ExternalKLineSource, "xauusd_merged"]
+SGE_AU9999_PRODUCT = "SGE-Au99.99"
+XAUUSD_PRODUCT = "WG-XAUUSD"
+MACRO_USDCNY_PRODUCT = "MACRO-USDCNY"
+MACRO_DXY_PRODUCT = "MACRO-DXY"
+MACRO_US10Y_PRODUCT = "MACRO-US10Y"
+MACRO_DAILY_PRODUCTS: tuple[str, ...] = (MACRO_USDCNY_PRODUCT, MACRO_DXY_PRODUCT, MACRO_US10Y_PRODUCT)
+XAUUSD_MERGED_SOURCE = "xauusd_merged"
+XAUUSD_ORIGIN_CODES = {"dukascopy_bid": 1.0, "histdata_bid": 2.0, "jd_public_kline": 3.0}
+
+
+class ExternalCandle(NamedTuple):
+    """指明柱开始和源端可用时刻的外部原始行情。"""
+
+    time: datetime
+    end: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float | None = None
+    turnover: float | None = None
+
+
+@dataclass
+class ExternalBarResult:
+    """单个外部行情数据序列的入库统计。"""
+
+    written: dict[str, int] = field(default_factory=dict)
+    rejected: int = 0
+    error: str | None = None
 
 
 class KLineBar(BaseModel):
@@ -10,7 +47,7 @@ class KLineBar(BaseModel):
 
     product_code: str
     interval: str
-    source: Literal["jd_public_kline", "jd_sim_kline"]
+    source: KLineSource
     bar_time: AwareDatetime
     trade_date: str
     open_price: FiniteFloat = Field(gt=0)
@@ -21,6 +58,8 @@ class KLineBar(BaseModel):
     volume: FiniteFloat | None = None
     turnover: FiniteFloat | None = None
     collected_at: AwareDatetime
+    available_at: AwareDatetime | None = None
+    origin_source: XauusdOrigin | None = None
 
 
 class TimeSharingPoint(BaseModel):

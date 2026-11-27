@@ -15,6 +15,7 @@ from src.routers.v1.paper import router as paper_router
 from src.routers.v1.qlib import router as qlib_router
 from src.routers.v1.quotes import router as quotes_router
 from src.routers.v1.reconciliation import router as reconciliation_router
+from src.routers.v1.timesfm import router as timesfm_router
 from src.runtime.dependencies import RuntimeDependencies
 
 
@@ -39,3 +40,4 @@ api_v1_router.include_router(paper_router)
 api_v1_router.include_router(live_router)
 api_v1_router.include_router(jd_router)
 api_v1_router.include_router(qlib_router)
+api_v1_router.include_router(timesfm_router)

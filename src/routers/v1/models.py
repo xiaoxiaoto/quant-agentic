@@ -44,6 +44,7 @@ def model_status(
         },
         "news_sync": runtime.news_sync.status(),
         "qlib": runtime.qlib_research.get_status().model_dump(mode="json"),
+        "timesfm_pipeline": runtime.timesfm_pipeline.get_status().model_dump(mode="json"),
     }
 
 

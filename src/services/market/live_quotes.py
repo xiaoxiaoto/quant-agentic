@@ -360,6 +360,7 @@ class LiveQuoteCollector:
         start_time: datetime | None = None,
         end_time: datetime | None = None,
         limit: int | None = 500,
+        valid_only: bool = False,
     ) -> list[ReferenceQuote]:
         """按产品与时间区间查询已持久化的参考行情序列。"""
         ReferenceProductCatalog.get(product_code)
@@ -368,6 +369,7 @@ class LiveQuoteCollector:
             start_time=start_time,
             end_time=end_time,
             limit=limit,
+            valid_only=valid_only,
         )
 
     def status(self, product_code: str = "CMBC-JCJ") -> LiveQuoteStatus:

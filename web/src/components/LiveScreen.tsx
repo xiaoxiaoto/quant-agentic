@@ -53,6 +53,7 @@ export default function LiveScreen({
 }: LiveScreenProps) {
   const [fullscreen, setFullscreen] = useState(!!document.fullscreenElement);
   const [fullscreenError, setFullscreenError] = useState(false);
+  const [chartRefresh, setChartRefresh] = useState(0);
   useEffect(() => {
     document.title = "GoldQuant · 实时大屏";
     const sync = () => setFullscreen(!!document.fullscreenElement);
@@ -95,7 +96,10 @@ export default function LiveScreen({
         </div>
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           <ScreenClock />
-          <button type="button" aria-label="立即刷新" title="立即刷新" onClick={onRefresh}
+          <button type="button" aria-label="立即刷新" title="立即刷新" disabled={refreshing} onClick={() => {
+            setChartRefresh((value) => value + 1);
+            onRefresh();
+          }}
             className="secondary-button min-h-10 px-2.5">
             <RefreshCw className={`size-4 ${refreshing ? "animate-spin" : ""}`} />
           </button>
@@ -110,57 +114,60 @@ export default function LiveScreen({
         </div>
       </header>
 
-      <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-1.5 text-sm text-slate-300">
-        <p className="flex flex-wrap items-center gap-x-3 gap-y-1" role="status">
-          <span className={`inline-flex items-center gap-2 font-medium ${liveFailed ? "text-amber-200" : risk?.tone ?? ""}`}>
-            <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />{riskText}
-          </span>
-          {liveStatus?.kill_switch_active && (
-            <span className={liveFailed ? "text-slate-300" : "text-rose-200"}>{liveFailed ? "上次已知 · 急停已启用" : "急停已启用"}</span>
-          )}
-          {liveStatus && !liveFailed && <span>{liveStatus.is_trading_session ? "交易时段内" : "休市"}</span>}
-        </p>
-        <p className="flex flex-wrap items-center gap-x-2 gap-y-1" role="status">
-          <span>每 10 秒刷新</span>
-          {quotesFailed && <strong className="font-medium text-amber-200">{quotesUpdatedAt ? "行情更新失败 · 显示上次数据" : "行情读取失败"}</strong>}
-          {quotesUpdatedAt
-            ? <span>{quotesFailed ? "上次刷新" : "行情刷新"} <time dateTime={quotesUpdatedAt}>{formatBeijingTime(quotesUpdatedAt)}</time></span>
-            : !quotesFailed && <span>正在读取行情</span>}
-        </p>
+      <div className="space-y-1.5">
+        <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-1.5 text-sm text-slate-300">
+          <p className="flex flex-wrap items-center gap-x-3 gap-y-1" role="status">
+            <span className={`inline-flex items-center gap-2 font-medium ${liveFailed ? "text-amber-200" : risk?.tone ?? ""}`}>
+              <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />{riskText}
+            </span>
+            {liveStatus?.kill_switch_active && (
+              <span className={liveFailed ? "text-slate-300" : "text-rose-200"}>{liveFailed ? "上次已知 · 急停已启用" : "急停已启用"}</span>
+            )}
+            {liveStatus && !liveFailed && <span>{liveStatus.is_trading_session ? "交易时段内" : "休市"}</span>}
+          </p>
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1" role="status">
+            <span>报价每 10 秒刷新 · 图表分时每分钟刷新</span>
+            {quotesFailed && <strong className="font-medium text-amber-200">{quotesUpdatedAt ? "行情更新失败 · 显示上次数据" : "行情读取失败"}</strong>}
+            {quotesUpdatedAt
+              ? <span>{quotesFailed ? "上次刷新" : "行情刷新"} <time dateTime={quotesUpdatedAt}>{formatBeijingTime(quotesUpdatedAt)}</time></span>
+              : !quotesFailed && <span>正在读取行情</span>}
+          </p>
+        </div>
+        {fullscreenError && <p role="alert" className="text-sm text-amber-200">浏览器未能切换全屏，可使用浏览器菜单切换全屏。</p>}
       </div>
-      {fullscreenError && <p role="alert" className="text-sm text-amber-200">浏览器未能切换全屏，可使用浏览器菜单切换全屏。</p>}
 
-      <div className="screen-main">
-        <section className="market-stage screen-panel flex flex-col justify-between" aria-labelledby="screen-benchmark-title">
-          <div className="market-orbit" aria-hidden="true"><span /></div>
-          <div className="relative">
-            <h2 id="screen-benchmark-title" className="text-lg font-medium text-slate-100 sm:text-xl">民生银行积存金</h2>
-            <p className="market-price screen-price mt-2 flex flex-wrap items-baseline gap-x-2">
-              <span>{quote ? `¥${quote.price.toFixed(2)}` : "—"}</span>
-              <span className="text-base font-medium tracking-normal text-slate-300 sm:text-lg">元/克</span>
-            </p>
-            <div className="mt-3"><ScreenQuoteMeta quote={quote} /></div>
+      <section className="market-stage screen-panel flex flex-wrap items-center justify-between gap-4" aria-labelledby="screen-benchmark-title">
+        <div className="market-orbit" aria-hidden="true"><span /></div>
+        <div className="relative">
+          <h2 id="screen-benchmark-title" className="text-lg font-medium text-slate-100 sm:text-xl">民生银行积存金</h2>
+          <p className="market-price screen-price mt-2 flex flex-wrap items-baseline gap-x-2">
+            <span>{quote ? `¥${quote.price.toFixed(2)}` : "—"}</span>
+            <span className="text-base font-medium tracking-normal text-slate-300 sm:text-lg">元/克</span>
+          </p>
+          <div className="mt-3"><ScreenQuoteMeta quote={quote} /></div>
+        </div>
+
+        <dl className="relative grid grid-cols-2 gap-3 sm:gap-5">
+          <div className="min-w-0">
+            <dt className="text-sm text-slate-300">伦敦金折合</dt>
+            <dd className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">
+              {london?.cny_per_g != null ? `¥${london.cny_per_g.toFixed(2)}` : "—"}
+              <span className="ml-1 text-xs font-normal text-slate-300">元/克</span>
+            </dd>
           </div>
-
-          <dl className="relative mt-5 grid grid-cols-2 gap-3 border-t border-white/12 pt-4 sm:mt-7 sm:gap-5">
-            <div className="min-w-0">
-              <dt className="text-sm text-slate-300">伦敦金折合</dt>
-              <dd className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">
-                {london?.cny_per_g != null ? `¥${london.cny_per_g.toFixed(2)}` : "—"}
-                <span className="ml-1 text-xs font-normal text-slate-300">元/克</span>
-              </dd>
-            </div>
-            <div className="min-w-0 border-l border-white/12 pl-3 sm:pl-5">
-              <dt className="text-sm text-slate-300">{spread.value == null ? "价差不可用" : spread.reason ? "参考价差" : "溢价"}</dt>
-              <dd className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">
-                {spread.value == null ? "—" : `${spread.value >= 0 ? "+" : ""}${spread.value.toFixed(2)}`}
-                <span className="ml-1 text-xs font-normal text-slate-300">元/克</span>
-              </dd>
-              {spread.reason && <dd className="mt-1 text-xs text-slate-300">{spread.reason}</dd>}
-            </div>
-          </dl>
-        </section>
-        <ScreenTrend quote={quote} quotesFailed={quotesFailed} />
+          <div className="min-w-0 border-l border-white/12 pl-3 sm:pl-5">
+            <dt className="text-sm text-slate-300">{spread.value == null ? "价差不可用" : spread.reason ? "参考价差" : "溢价"}</dt>
+            <dd className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">
+              {spread.value == null ? "—" : `${spread.value >= 0 ? "+" : ""}${spread.value.toFixed(2)}`}
+              <span className="ml-1 text-xs font-normal text-slate-300">元/克</span>
+            </dd>
+            {spread.reason && <dd className="mt-1 text-xs text-slate-300">{spread.reason}</dd>}
+          </div>
+        </dl>
+      </section>
+      <div className="screen-main">
+        <ScreenTrend productCode="CMBC-JCJ" title="民生积存金走势" unit="元/克" refreshKey={chartRefresh} />
+        <ScreenTrend productCode="WG-XAUUSD" title="伦敦金走势" unit="美元/盎司" refreshKey={chartRefresh} />
       </div>
 
       <section className="surface screen-panel" aria-labelledby="screen-watchlist-title">

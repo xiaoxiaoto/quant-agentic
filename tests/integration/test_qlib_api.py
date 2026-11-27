@@ -97,4 +97,15 @@ def test_qlib_status_export_experiments_and_security(tmp_path: Path, monkeypatch
     res_exps = client.get("/api/v1/qlib/experiments")
     assert res_exps.status_code == 200
     assert res_exps.json()["total"] == 0
+
+    # 6. 回测与盘前信号接口 503 降级与路径安全防护
+    monkeypatch.setattr(runtime.qlib_backtest, "run_backtest", _raise_unavailable)  # type: ignore[attr-defined]
+    res_bt = client.post("/api/v1/qlib/backtest", json={"instrument": "SGE-Au99.99", "freq": "day"})
+    assert res_bt.status_code == 503
+
+    res_sig_traversal = client.post(
+        "/api/v1/qlib/signal",
+        json={"instrument": "SGE-Au99.99", "model_dir": "../../outside_model"},
+    )
+    assert res_sig_traversal.status_code == 400
     asyncio.run(runtime.close())

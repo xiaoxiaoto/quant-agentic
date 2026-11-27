@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.clients.jd_gold import JDGoldError, JDGoldLoginRequiredError
 from src.contracts.domains.account import AccountSnapshot, OrderEvent
+from src.contracts.schemas.trading import FifoSummaryResponse
 from src.runtime.dependencies import RuntimeDependencies
 
 router = APIRouter(prefix="/ledger", tags=["ledger"])
@@ -30,6 +31,25 @@ def get_order_history(
 ) -> list[OrderEvent]:
     """获取本地影子账本记录的订单历史流水（支持分页）。"""
     return runtime.ledger.get_order_history(offset=offset, limit=limit)
+
+
+@router.get("/fifo-summary", response_model=FifoSummaryResponse)
+def get_fifo_summary(
+    runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
+    only_open: Annotated[bool, Query(description="是否仅查看在持中的买入批次")] = False,
+    reference_price: Annotated[
+        float | None, Query(gt=0, allow_inf_nan=False, description="重估参考金价（元/克）")
+    ] = None,
+    offset: Annotated[int, Query(ge=0, description="分页偏移量")] = 0,
+    limit: Annotated[int | None, Query(ge=1, le=500, description="分页条数，留空返回全部")] = None,
+) -> FifoSummaryResponse:
+    """获取影子账本先进先出（FIFO）匹配汇总与订单切片明细。"""
+    return runtime.ledger.compute_fifo_lots(
+        reference_price=reference_price,
+        only_open=only_open,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("/init-from-jd", response_model=AccountSnapshot)

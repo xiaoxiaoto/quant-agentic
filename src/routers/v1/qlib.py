@@ -6,11 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.contracts.exceptions import QlibDatasetError, QlibUnavailableError
 from src.contracts.schemas import (
+    QlibBacktestReport,
+    QlibBacktestRequest,
     QlibExperimentListResponse,
     QlibExportReport,
     QlibExportRequest,
     QlibFactorEvaluateReport,
     QlibFactorEvaluateRequest,
+    QlibSignalRequest,
+    QlibSignalResponse,
     QlibStatusResponse,
     QlibTrainReport,
     QlibTrainRequest,
@@ -89,6 +93,57 @@ def train_qlib_model(
             payload,
             provider_uri_override=provider_override,
             output_model_dir_override=model_dir_override,
+        )
+    except QlibUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    except (QlibDatasetError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    finally:
+        runtime.qlib_lock.release()
+
+
+@router.post("/backtest", response_model=QlibBacktestReport)
+def run_qlib_backtest(
+    payload: QlibBacktestRequest,
+    runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
+) -> QlibBacktestReport:
+    """运行单标的 Au99.99 滚动样本外阈值择时回测并与买入持有基准对比。"""
+    if not runtime.qlib_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="当前已有 Qlib 研究或回测任务正在运行，请稍后重试")
+    try:
+        provider_override = (
+            runtime.resolve_qlib_provider_path(payload.provider_uri, source_type=payload.source_type)
+            if payload.provider_uri is not None
+            else None
+        )
+        return runtime.qlib_backtest.run_backtest(payload, provider_uri_override=provider_override)
+    except QlibUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    except (QlibDatasetError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    finally:
+        runtime.qlib_lock.release()
+
+
+@router.post("/signal", response_model=QlibSignalResponse)
+def generate_qlib_signal(
+    payload: QlibSignalRequest,
+    runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
+) -> QlibSignalResponse:
+    """基于已训练 Qlib 模型生成单标的盘前择时信号，可选写入人工复核提醒队列。"""
+    if not runtime.qlib_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="当前已有 Qlib 研究或信号任务正在运行，请稍后重试")
+    try:
+        provider_override = (
+            runtime.resolve_qlib_provider_path(payload.provider_uri, source_type=payload.source_type)
+            if payload.provider_uri is not None
+            else None
+        )
+        model_override = runtime.resolve_data_path(payload.model_dir) if payload.model_dir is not None else None
+        return runtime.qlib_signal.generate_signal(
+            payload,
+            provider_uri_override=provider_override,
+            model_dir_override=model_override,
         )
     except QlibUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from None

@@ -57,6 +57,34 @@ class Settings(AppSettings, ServerSettings, TradingSettings, ModelSettings, JDSe
             return None
         return self.resolve_project_path(self.qlib_model_dir)
 
+    @property
+    def resolved_qlib_macro_csv_dir(self) -> Path | None:
+        """返回锚定后的本地宏观 CSV 容灾目录。"""
+        if not self.qlib_macro_csv_dir:
+            return None
+        return self.resolve_project_path(self.qlib_macro_csv_dir)
+
+    @property
+    def resolved_timesfm_model_dir(self) -> Path | None:
+        """返回锚定后的 TimesFM 多因子推理模型产物目录。"""
+        if not self.timesfm_model_dir:
+            return None
+        return self.resolve_project_path(self.timesfm_model_dir)
+
+    @property
+    def resolved_timesfm_dataset_dir(self) -> Path:
+        """返回锚定后的 TimesFM 数据集根目录，默认跟随 resolved_data_dir。"""
+        if self.timesfm_dataset_dir == "data/timesfm_datasets":
+            return self.resolved_data_dir / "timesfm_datasets"
+        return self.resolve_project_path(self.timesfm_dataset_dir)
+
+    @property
+    def resolved_timesfm_experiment_dir(self) -> Path:
+        """返回锚定后的 TimesFM 实验记录目录，默认跟随 resolved_data_dir。"""
+        if self.timesfm_experiment_dir == "data/timesfm_experiments":
+            return self.resolved_data_dir / "timesfm_experiments"
+        return self.resolve_project_path(self.timesfm_experiment_dir)
+
     def resolve_project_path(self, raw_path: str) -> Path:
         """将相对配置路径锚定到项目根目录，绝对路径原样返回。"""
         path = Path(raw_path)

@@ -22,6 +22,7 @@ from src.agents.lightgbm import LightGBMAgent
 from src.agents.news import NewsAgent
 from src.agents.qlib import QlibAgent
 from src.agents.timesfm import TimesFMAgent
+from src.agents.timesfm_multifactor import TimesFMMultiFactorAgent
 from src.clients.fx_rate import FXRateClient
 from src.configs.settings import Settings
 from src.contracts.domains.decision import RiskBudget
@@ -36,6 +37,7 @@ from src.repositories.qlib_experiment import QlibExperimentRepository
 from src.repositories.quote import QuoteRepository
 from src.repositories.reference_quote import ReferenceQuoteRepository
 from src.repositories.runtime_state import RuntimeStateRepository
+from src.repositories.timesfm_experiment import TimesFMExperimentRepository
 from src.services.decision.decision_engine import DecisionEngine
 from src.services.execution.backtest_service import BacktestService
 from src.services.execution.execution_adapter import ExecutionAdapter
@@ -54,13 +56,19 @@ from src.services.market.session_calendar import SessionCalendar
 from src.services.prediction.feature_engine import FeatureEngine
 from src.services.prediction.predictor import ModelPredictor
 from src.services.prediction.training_pipeline import TrainingPipelineService
+from src.services.qlib.backtest_service import QlibBacktestService
 from src.services.qlib.data_exporter import QlibDataExporter
 from src.services.qlib.research_service import QlibResearchService
 from src.services.qlib.runtime_bridge import QlibRuntimeBridge
+from src.services.qlib.signal_service import QlibSignalService
 from src.services.risk.alert_service import AlertService
 from src.services.risk.news_risk import NewsRiskEngine
 from src.services.risk.news_sync import NewsSyncService
 from src.services.risk.risk_engine import RiskEngine
+from src.services.timesfm.backtest_engine import TimesFMBacktestEngine
+from src.services.timesfm.dataset_builder import TimesFMDatasetBuilder
+from src.services.timesfm.pipeline_service import TimesFMPipelineService
+from src.services.timesfm.trainer import TimesFMTrainer
 
 
 class RuntimeDependencies:
@@ -73,6 +81,7 @@ class RuntimeDependencies:
         self.settings = settings
         self.training_lock = Lock()
         self.qlib_lock = Lock()
+        self.timesfm_lock = Lock()
         self.state_store = RuntimeStateRepository(settings.database_path)
         self.products = ProductRepository()
         self.calendar = SessionCalendar()
@@ -91,13 +100,8 @@ class RuntimeDependencies:
             scope="paper",
         )
         self.quotes = QuoteRepository(storage_dir=settings.resolved_data_dir, database_path=settings.database_path)
-        self.model: NetReturnModelProtocol | None = self._build_predictor_model(settings)
-        self.timesfm = TimesFMAgent(
-            is_enabled=settings.timesfm_enabled,
-            checkpoint_path=settings.timesfm_checkpoint,
-            device=settings.timesfm_device,
-            context_length=settings.timesfm_context_length,
-        )
+        self.timesfm = self._build_timesfm_agent(settings)
+        self.model: NetReturnModelProtocol | None = self._build_predictor_model(settings, self.timesfm)
         self.news = NewsRiskEngine(state_store=self.state_store)
         self.news_agent = (
             NewsAgent(
@@ -199,7 +203,56 @@ class RuntimeDependencies:
             weekly_loss_trigger_pct=settings.weekly_loss_trigger_pct,
         )
         self.risk = RiskEngine(risk_budget=risk_budget, fee_rule=fee_rule)
+        timesfm_experiment_dir = settings.resolved_timesfm_experiment_dir
+        timesfm_builder = TimesFMDatasetBuilder(
+            self.quotes,
+            self.calendar,
+            live_quotes=self.live_quotes,
+            market_bars=self.market_bars,
+            fee_rule=fee_rule,
+            basis_reference_product=settings.basis_reference_product,
+            default_product_code=settings.default_product_code,
+        )
+        timesfm_repo = TimesFMExperimentRepository(timesfm_experiment_dir)
+        timesfm_trainer = TimesFMTrainer(
+            timesfm_builder,
+            self.timesfm,
+            timesfm_repo,
+            timesfm_experiment_dir,
+            agent_factory=self._create_offline_timesfm_agent,
+        )
+        self.timesfm_pipeline = TimesFMPipelineService(
+            builder=timesfm_builder,
+            trainer=timesfm_trainer,
+            backtest=TimesFMBacktestEngine(
+                timesfm_builder,
+                timesfm_trainer,
+                self.timesfm,
+                self.decision,
+                self.risk,
+                fee_rule,
+                agent_factory=self._create_offline_timesfm_agent,
+            ),
+            experiment_repo=timesfm_repo,
+            data_root=settings.resolved_data_dir,
+            dataset_dir=settings.resolved_timesfm_dataset_dir,
+            experiment_dir=timesfm_experiment_dir,
+            timesfm_enabled=settings.timesfm_enabled,
+            predictor_backend=settings.predictor_backend,
+            active_model_dir=str(settings.resolved_timesfm_model_dir) if settings.resolved_timesfm_model_dir else None,
+        )
         self.alerts = AlertService(fee_rule=fee_rule, state_store=self.state_store)
+        self.qlib_backtest = QlibBacktestService(self.qlib_research)
+        self.qlib_signal = QlibSignalService(
+            self.qlib_research,
+            alerts=self.alerts,
+            ledger=self.ledger,
+            default_model_dir=str(settings.resolved_qlib_model_dir) if settings.resolved_qlib_model_dir else None,
+            default_buy_thresh=settings.qlib_au9999_buy_thresh,
+            default_sell_thresh=settings.qlib_au9999_sell_thresh,
+            default_trade_grams=settings.qlib_au9999_trade_unit_grams,
+            default_spread_pct=settings.live_reference_spread_pct,
+        )
         self.reconciliation = ReconciliationService()
         self.rfq = RFQExecutionEngine(fee_rule=fee_rule)
         self.execution = ExecutionAdapter(ledger=self.ledger, is_live_enabled=False, state_store=self.state_store)
@@ -233,7 +286,7 @@ class RuntimeDependencies:
             synthetic_spread_pct=settings.synthetic_paper_spread_pct,
             basis_reference_product=settings.basis_reference_product,
             timesfm_enabled=settings.timesfm_enabled,
-            timesfm_context_length=settings.timesfm_context_length,
+            timesfm_context_length=self.timesfm.context_length,
         )
         self.live = LiveTradingService(
             quotes=self.quotes,
@@ -254,18 +307,68 @@ class RuntimeDependencies:
             basis_reference_product=settings.basis_reference_product,
             default_initial_cash=settings.default_initial_cash,
             timesfm_enabled=settings.timesfm_enabled,
-            timesfm_context_length=settings.timesfm_context_length,
+            timesfm_context_length=self.timesfm.context_length,
         )
         self._quality_guards_lock = Lock()
         self.quality_guards: OrderedDict[tuple[str, str], DataQualityGuard] = OrderedDict()
 
+    def _create_offline_timesfm_agent(self, checkpoint_path: str | None = None) -> TimesFMAgent:
+        """为离线训练与回测构造与线上单例完全隔离的 TimesFMAgent 实例。"""
+        return self.timesfm.clone_isolated(checkpoint_path=checkpoint_path)
+
     @staticmethod
-    def _build_predictor_model(settings: Settings) -> NetReturnModelProtocol | None:
-        """按 predictor_backend 与模型目录配置装配 QlibAgent 或 LightGBMAgent。"""
+    def _uses_timesfm_predictor(settings: Settings) -> bool:
+        """判断当前配置实际启用的预测后端是否为 TimesFM 多因子模型。"""
+        if settings.predictor_backend == "timesfm":
+            return True
+        if settings.predictor_backend != "auto":
+            return False
+        return (
+            settings.resolved_qlib_model_dir is None
+            and not settings.lightgbm_model_dir
+            and settings.resolved_timesfm_model_dir is not None
+        )
+
+    @classmethod
+    def _build_timesfm_agent(cls, settings: Settings) -> TimesFMAgent:
+        """构造 TimesFM Agent；仅在实际启用 TimesFM 预测后端时联动产物的权重与校准参数。"""
+        checkpoint = settings.timesfm_checkpoint
+        context_length = settings.timesfm_context_length
+        slope, intercept = 1.0, 0.0
+        model_dir = settings.resolved_timesfm_model_dir
+        if model_dir is not None and cls._uses_timesfm_predictor(settings):
+            manifest_path = model_dir / TimesFMMultiFactorAgent.MANIFEST_NAME
+            if manifest_path.is_file():
+                backbone = TimesFMMultiFactorAgent.read_backbone_config(model_dir)
+                if backbone["checkpoint_path"] is not None:
+                    checkpoint = str(backbone["checkpoint_path"])
+                if backbone["context_length"] is not None:
+                    context_length = int(backbone["context_length"])
+                slope = float(backbone["calibration_slope"])
+                intercept = float(backbone["calibration_intercept"])
+        return TimesFMAgent(
+            is_enabled=settings.timesfm_enabled,
+            checkpoint_path=checkpoint,
+            device=settings.timesfm_device,
+            context_length=context_length,
+            calibration_slope=slope,
+            calibration_intercept=intercept,
+        )
+
+    @staticmethod
+    def _build_predictor_model(
+        settings: Settings, timesfm_agent: TimesFMAgent | None = None
+    ) -> NetReturnModelProtocol | None:
+        """按 predictor_backend 与模型目录配置装配 QlibAgent、LightGBMAgent 或 TimesFMMultiFactorAgent。"""
         backend = settings.predictor_backend
         qlib_dir = settings.resolved_qlib_model_dir
+        timesfm_dir = settings.resolved_timesfm_model_dir
         if backend == "heuristic":
             return None
+        if backend == "timesfm":
+            if timesfm_dir is None:
+                raise ValueError("PREDICTOR_BACKEND=timesfm 时必须配置 TIMESFM_MODEL_DIR")
+            return TimesFMMultiFactorAgent(timesfm_dir, timesfm_agent=timesfm_agent)
         if backend == "qlib":
             if qlib_dir is None:
                 raise ValueError("PREDICTOR_BACKEND=qlib 时必须配置 QLIB_MODEL_DIR")
@@ -278,6 +381,8 @@ class RuntimeDependencies:
             return QlibAgent(qlib_dir)
         if settings.lightgbm_model_dir:
             return LightGBMAgent(settings.resolve_project_path(settings.lightgbm_model_dir))
+        if timesfm_dir is not None:
+            return TimesFMMultiFactorAgent(timesfm_dir, timesfm_agent=timesfm_agent)
         return None
 
     def _bridge_reference_quote(self, quote: ReferenceQuote) -> None:
@@ -304,9 +409,84 @@ class RuntimeDependencies:
         return runtime
 
     @classmethod
+    def verify_cross_site_write(cls, request: Request, allowed_origins: tuple[str, ...] = ()) -> None:
+        """拦截并拒绝未在白名单中的跨站写入请求（POST/PUT/PATCH/DELETE）。"""
+        if request.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return
+
+        allowed = {item.strip().rstrip("/").lower() for item in allowed_origins if item.strip()}
+        if "*" in allowed:
+            return
+
+        def normalize_host(host_str: str, scheme: str) -> str:
+            normalized = host_str.strip().lower()
+            if scheme == "http" and normalized.endswith(":80"):
+                return normalized[:-3]
+            if scheme == "https" and normalized.endswith(":443"):
+                return normalized[:-4]
+            return normalized
+
+        # 收集受信任的服务端自身访问来源（兼顾直连与多跳反向代理环境）
+        forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        request_scheme = (forwarded_proto or request.url.scheme or "http").lower()
+
+        forwarded_host = request.headers.get("x-forwarded-host", "").split(",")[0].strip().lower()
+        direct_host = (request.headers.get("host") or request.url.netloc or "").strip().lower()
+
+        valid_hosts = set()
+        for raw_h in (forwarded_host, direct_host):
+            if raw_h:
+                valid_hosts.add(raw_h)
+                valid_hosts.add(normalize_host(raw_h, request_scheme))
+
+        sec_fetch_site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+        raw_origin = request.headers.get("origin", "").strip()
+        raw_referer = request.headers.get("referer", "").strip()
+
+        # 1. 优先校验 Origin 标头
+        if raw_origin:
+            normalized_origin = raw_origin.rstrip("/").lower()
+            if normalized_origin in allowed:
+                return
+            if normalized_origin == "null":
+                raise HTTPException(status_code=403, detail="拒绝跨站写入请求")
+            parsed_origin = urlparse(raw_origin)
+            origin_scheme = (parsed_origin.scheme or "").lower()
+            origin_host = normalize_host(parsed_origin.netloc or "", origin_scheme)
+            if sec_fetch_site == "cross-site":
+                raise HTTPException(status_code=403, detail="拒绝跨站写入请求")
+            if not origin_host or origin_host not in valid_hosts or origin_scheme != request_scheme:
+                raise HTTPException(status_code=403, detail="拒绝跨站写入请求")
+            return
+
+        # 2. 缺失 Origin 时回退校验 Referer 标头
+        if raw_referer:
+            parsed_ref = urlparse(raw_referer)
+            ref_scheme = (parsed_ref.scheme or "").lower()
+            ref_netloc = (parsed_ref.netloc or "").lower()
+            ref_host = normalize_host(ref_netloc, ref_scheme)
+            ref_origin = f"{ref_scheme}://{ref_netloc}".rstrip("/").lower() if ref_scheme and ref_netloc else ""
+            if ref_origin and ref_origin in allowed:
+                return
+            if sec_fetch_site == "cross-site":
+                raise HTTPException(status_code=403, detail="拒绝跨站写入请求")
+            if not ref_host or ref_host not in valid_hosts or ref_scheme != request_scheme:
+                raise HTTPException(status_code=403, detail="拒绝跨站写入请求")
+            return
+
+        # 3. 若无 Origin 亦无 Referer，但浏览器明确声明 Sec-Fetch-Site: cross-site，则坚决拦截
+        if sec_fetch_site == "cross-site":
+            raise HTTPException(status_code=403, detail="拒绝跨站写入请求")
+
+    @classmethod
     def verify_api_access(cls, request: Request, runtime: "RuntimeDependencies | None" = None) -> None:
         """校验 API 访问令牌及浏览器写请求同源约束，防止未授权访问与跨站请求伪造。"""
         effective_runtime = runtime if runtime is not None else cls.from_request(request)
+
+        # 1. 优先校验跨站写入约束（POST/PUT/PATCH/DELETE）
+        cls.verify_cross_site_write(request, effective_runtime.settings.allowed_origins)
+
+        # 2. 校验 API 访问令牌（若配置）
         expected = effective_runtime.settings.api_auth_token.get_secret_value().strip()
         if expected:
             auth_header = request.headers.get("authorization", "")
@@ -315,24 +495,6 @@ class RuntimeDependencies:
             provided = bearer or api_key
             if not provided or not hmac.compare_digest(provided, expected):
                 raise HTTPException(status_code=401, detail="缺少或无效的 API 访问令牌")
-
-        if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
-            origin = request.headers.get("origin", "").strip()
-            if origin:
-                allowed = {
-                    item.strip().rstrip("/").lower()
-                    for item in effective_runtime.settings.allowed_origins
-                    if item.strip()
-                }
-                normalized_origin = origin.rstrip("/").lower()
-                if normalized_origin not in allowed:
-                    parsed_origin = urlparse(origin)
-                    origin_scheme = (parsed_origin.scheme or "").lower()
-                    origin_host = (parsed_origin.netloc or "").lower()
-                    request_scheme = (request.url.scheme or "").lower()
-                    request_host = (request.headers.get("host") or "").lower()
-                    if not origin_host or origin_host != request_host or origin_scheme != request_scheme:
-                        raise HTTPException(status_code=403, detail="拒绝跨站写入请求")
 
     @staticmethod
     async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -388,6 +550,23 @@ class RuntimeDependencies:
         resolved = (root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
         if not resolved.is_relative_to(root):
             raise ValueError("路径必须位于配置的数据目录内")
+        return resolved
+
+    def resolve_output_subdir(self, raw_path: str) -> Path:
+        """将输出/导出目录约束为 DATA_DIR 下的非保留子目录，禁止写入数据根目录或内部运行目录。"""
+        root = self.settings.resolved_data_dir.resolve()
+        resolved = self.resolve_data_path(raw_path)
+        if resolved == root:
+            raise ValueError("输出目录不得指向数据根目录，请指定子目录")
+        reserved = (
+            (root / "jd-browser-profile").resolve(),
+            (root / "references").resolve(),
+            self.settings.resolved_qlib_experiment_dir.resolve(),
+            self.settings.resolved_timesfm_experiment_dir.resolve(),
+        )
+        for protected in reserved:
+            if resolved == protected or resolved.is_relative_to(protected):
+                raise ValueError("输出目录不得指向系统保留运行目录")
         return resolved
 
     def resolve_qlib_provider_path(self, raw_path: str, *, source_type: str) -> Path:

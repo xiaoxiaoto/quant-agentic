@@ -42,6 +42,6 @@ class JDSettings(BaseSettings):
     jd_holdings_sync_interval_seconds: float = Field(default=60.0, ge=10, le=3600, allow_inf_nan=False)
     market_bars_enabled: bool = True
     market_bars_interval_seconds: float = Field(default=60.0, ge=10, le=3600, allow_inf_nan=False)
-    market_kline_products: tuple[str, ...] = ("CMBC-JCJ", "SGE-Au99.99", "WG-JDAU")
+    market_kline_products: tuple[str, ...] = ("CMBC-JCJ", "SGE-Au99.99", "WG-JDAU", "WG-XAUUSD")
     market_kline_intervals: tuple[str, ...] = ("m1", "m5", "m15", "m30", "m60", "day", "week", "month", "year")
     market_timesharing_intervals: tuple[str, ...] = ("m1", "m5")

@@ -10,7 +10,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import AwareDatetime
 
 from src.clients.jd_gold import JDGoldError
-from src.contracts.domains.market_bar import KLineBar, MarketBarCollectorStatus, TimeSharingPoint
+from src.contracts.domains.market_bar import (
+    KLineBar,
+    KLineSource,
+    MarketBarCollectorStatus,
+    TimeSharingPoint,
+)
 from src.contracts.domains.quality import CollectorQualityReport
 from src.contracts.domains.quote import QuoteRaw
 from src.contracts.domains.reference_quote import (
@@ -103,6 +108,20 @@ def get_live_reference_quote(
     return quote
 
 
+@router.get("/live/history", response_model=list[tuple[AwareDatetime, float]])
+def get_live_quote_history(
+    runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
+    product_code: Annotated[str, Depends(validate_live_product)],
+    limit: Annotated[int, Query(ge=1, le=5000)] = 5000,
+) -> list[tuple[AwareDatetime, float]]:
+    """读取可用于绘图的有效历史报价源时间与价格。"""
+    return [
+        (quote.quote_at, quote.price)
+        for quote in runtime.live_quotes.query_series(product_code, limit=limit, valid_only=True)
+        if quote.quote_at is not None and quote.quality_state == DataQualityState.NORMAL
+    ]
+
+
 @router.post("/live/collect", response_model=ReferenceQuote)
 async def collect_live_reference_quote(
     runtime: Annotated[RuntimeDependencies, Depends(RuntimeDependencies.from_request)],
@@ -146,24 +165,27 @@ def query_market_klines(
         Query(description="K 线周期（m1/m5/m15/m30/m60/day/week/month/year）"),
     ] = "day",
     source: Annotated[
-        Literal["jd_public_kline", "jd_sim_kline"] | None,
-        Query(description="可选数据来源过滤（jd_public_kline / jd_sim_kline）"),
+        KLineSource | None,
+        Query(description="按来源筛选 K 线，WG-XAUUSD 默认使用合并行情"),
     ] = None,
     start_time: Annotated[AwareDatetime | None, Query(description="起始时间（带时区）")] = None,
     end_time: Annotated[AwareDatetime | None, Query(description="结束时间（带时区）")] = None,
     limit: Annotated[int, Query(ge=1, le=5000, description="返回最大条数")] = 500,
 ) -> list[KLineBar]:
-    """查询 SQLite 中已采集的多周期 K 线历史序列。"""
+    """查询多周期 K 线，XAUUSD 默认返回合并行情。"""
     if start_time is not None and end_time is not None and start_time > end_time:
         raise HTTPException(status_code=400, detail="起始时间不得晚于结束时间")
-    return runtime.market_bars.query_klines(
-        product_code,
-        interval,
-        source=source,
-        start_time=start_time,
-        end_time=end_time,
-        limit=limit,
-    )
+    try:
+        return runtime.market_bars.query_klines(
+            product_code,
+            interval,
+            source=source,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
 @router.get("/bars/timesharing", response_model=list[TimeSharingPoint])

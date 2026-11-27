@@ -1,12 +1,14 @@
-import { BrainCircuit, FlaskConical, Play } from "lucide-react";
+import { BrainCircuit, FlaskConical, Play, Workflow } from "lucide-react";
 import { useState } from "react";
 import type { BacktestSummary, TrainingPipelineReport } from "../api/types";
 import { BacktestLab } from "./BacktestLab";
+import { ModelWorkflowStudio } from "./workflow/ModelWorkflowStudio";
 
 interface ResearchViewProps {
   busyAction: string | null;
   backtestResult: BacktestSummary | null;
   trainReport: TrainingPipelineReport | null;
+  onNotify: (type: "ok" | "error", text: string) => void;
   onRunBacktest: (params: { initial_cash: number; trade_grams: number; dca_step_interval: number }) => void;
   onRunTrain: (params: {
     reference_product_code?: string;
@@ -21,10 +23,11 @@ export function ResearchView({
   busyAction,
   backtestResult,
   trainReport,
+  onNotify,
   onRunBacktest,
   onRunTrain,
 }: ResearchViewProps) {
-  const [subTab, setSubTab] = useState<"backtest" | "train">("backtest");
+  const [subTab, setSubTab] = useState<"backtest" | "train" | "workflow">("backtest");
   const [sourceMode, setSourceMode] = useState<"reference" | "quotes">("reference");
   const [refCode, setRefCode] = useState("CMBC-JCJ");
   const [horizon, setHorizon] = useState("1h");
@@ -65,10 +68,21 @@ export function ResearchView({
           <BrainCircuit className="size-3.5" />
           滚动训练
         </button>
+        <button
+          type="button"
+          onClick={() => setSubTab("workflow")}
+          aria-pressed={subTab === "workflow"}
+          className="segment"
+        >
+          <Workflow className="size-3.5" />
+          模型工作流
+        </button>
       </div>
 
       {subTab === "backtest" ? (
         <BacktestLab busyAction={busyAction} result={backtestResult} onRunBacktest={onRunBacktest} />
+      ) : subTab === "workflow" ? (
+        <ModelWorkflowStudio onNotify={onNotify} />
       ) : (
         <section className="surface p-4 sm:p-6 relative overflow-hidden space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-3">

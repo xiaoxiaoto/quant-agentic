@@ -358,6 +358,7 @@ export default function App() {
               busyAction={effectiveBusyAction}
               backtestResult={backtestResult}
               trainReport={trainReport}
+              onNotify={notify}
               onRunBacktest={(params) =>
                 void runAction("backtest", async () => {
                   const summary = await api.runBacktest(params);

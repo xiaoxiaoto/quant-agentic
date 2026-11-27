@@ -331,6 +331,105 @@ def test_market_bar_router_endpoints(tmp_path: Path) -> None:
     )
     assert bad_interval.status_code == 422
 
+    stamp = datetime(2025, 7, 7, 13, tzinfo=UTC)
+    MarketBarRepository(settings.database_path).save_klines(
+        [
+            KLineBar(
+                product_code="WG-XAUUSD",
+                interval="m5",
+                source="dukascopy_bid",
+                bar_time=stamp,
+                trade_date="2025-07-07",
+                open_price=3300,
+                high_price=3302,
+                low_price=3298,
+                close_price=3301,
+                collected_at=stamp + timedelta(minutes=5),
+            ),
+        ]
+    )
+    params = {"product_code": "WG-XAUUSD", "interval": "m5"}
+    merged = client.get("/api/v1/quotes/bars/kline", params=params)
+    assert merged.status_code == 200
+    assert [bar["source"] for bar in merged.json()] == ["xauusd_merged"]
+    assert [bar["origin_source"] for bar in merged.json()] == ["dukascopy_bid"]
+    raw = client.get("/api/v1/quotes/bars/kline", params={**params, "source": "dukascopy_bid"})
+    assert raw.status_code == 200
+    assert [bar["source"] for bar in raw.json()] == ["dukascopy_bid"]
+    week = client.get("/api/v1/quotes/bars/kline", params={**params, "interval": "week"})
+    assert week.status_code == 422
+    non_xauusd_merged = client.get(
+        "/api/v1/quotes/bars/kline",
+        params={"product_code": "CMBC-JCJ", "interval": "day", "source": "xauusd_merged"},
+    )
+    assert non_xauusd_merged.status_code == 422
+
     ok_ts = client.get("/api/v1/quotes/bars/timesharing", params={"product_code": "WG-JDAU", "granularity": "m1"})
     assert ok_ts.status_code == 200
     assert ok_ts.json() == []
+
+
+def test_live_quote_history_filters_in_sql_before_limit(tmp_path: Path) -> None:
+    """休市或异常期连续写入大量 STALE/GAP 记录时，/live/history 仍应返回有效的 NORMAL 历史点位。"""
+    from src.contracts.domains.reference_quote import ReferenceQuote
+    from src.contracts.enums.trading import DataQualityState
+    from src.repositories.reference_quote import ReferenceQuoteRepository
+
+    settings = Settings(
+        data_dir=str(tmp_path),
+        live_quotes_enabled=False,
+        market_bars_enabled=False,
+        news_sync_enabled=False,
+        jd_holdings_sync_enabled=False,
+        jd_proactive_auth_enabled=False,
+        timesfm_enabled=False,
+        news_enabled=False,
+    )
+    runtime = RuntimeDependencies(settings)
+    repo = ReferenceQuoteRepository(tmp_path / "live_quotes", database_path=settings.database_path)
+    base = datetime(2026, 11, 20, 10, 0, tzinfo=UTC)
+    for idx in range(2):
+        ts = base + timedelta(minutes=idx)
+        repo.save(
+            ReferenceQuote(
+                quote_id=f"normal-{idx}",
+                source_id="JD_API",
+                product_code="CMBC-JCJ",
+                unit="CNY/g",
+                price_side="reference",
+                price=760.0 + idx,
+                quote_at=ts,
+                received_at=ts,
+                available_at=ts,
+                is_tradable=False,
+                quality_state=DataQualityState.NORMAL,
+                payload_hash=f"h-normal-{idx}",
+            )
+        )
+    for idx in range(5):
+        ts = base + timedelta(minutes=10 + idx)
+        repo.save(
+            ReferenceQuote(
+                quote_id=f"stale-{idx}",
+                source_id="JD_API",
+                product_code="CMBC-JCJ",
+                unit="CNY/g",
+                price_side="reference",
+                price=761.0,
+                quote_at=None if idx == 0 else ts,
+                received_at=ts,
+                available_at=ts,
+                is_tradable=False,
+                quality_state=DataQualityState.STALE,
+                payload_hash=f"h-stale-{idx}",
+            )
+        )
+
+    app = FastAPI()
+    app.include_router(quotes_router.router, prefix="/api/v1")
+    app.state.runtime = runtime
+    client = TestClient(app)
+
+    resp = client.get("/api/v1/quotes/live/history", params={"product_code": "CMBC-JCJ", "limit": 2})
+    assert resp.status_code == 200
+    assert [price for _ts, price in resp.json()] == [760.0, 761.0]
